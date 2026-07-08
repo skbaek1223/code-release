@@ -96,6 +96,14 @@ def parse_args():
     p.add_argument('--budget_lambda', type=float, default=0.6)
     p.add_argument('--budget_r', type=float, default=2.0)
 
+    # Qwen3 thinking mode. When False (default), apply_chat_template receives
+    # enable_thinking=False so Qwen3 skips the <think> block and responds
+    # directly. Set --thinking_mode to enable internal chain-of-thought.
+    # Non-Qwen3 tokenizers ignore the enable_thinking kwarg silently.
+    p.add_argument('--thinking_mode', action='store_true',
+                   help="Enable Qwen3 thinking mode (enable_thinking=True in "
+                        "apply_chat_template). Default: off.")
+
     return p.parse_args()
 
 
@@ -183,7 +191,7 @@ def main():
     if args.budget_base is None:
         args.budget_base = 90.0 if eval_name in MULTI_HOP_DATASETS else 60.0
 
-    # ----- Load QA -----
+    # ----- Load QA (accepts a JSON array or JSONL) -----
     with open(args.qa_data_path, 'r', encoding='utf-8') as f:
         text = f.read()
     stripped = text.lstrip()
@@ -218,14 +226,11 @@ def main():
 
     # ----- Steps model: generate retrieval guide per question, then free -----
     retrieval_guides = ["" for _ in filtered_data]
-    # Per-question planner token counts. OUTPUT = stripped retrieval guide
-    # (the numbered steps, excluding any <think>...</think> CoT). INPUT =
-    # the chat-templated system + user prompt that would produce it. Same
-    # rule for fresh and cache-hit questions, so cache only saves wall time
-    # and the recorded compute cost reflects what the model would have done.
+    # Per-question planner token counts. OUTPUT = stripped retrieval guide;
+    # INPUT = chat-templated system + user prompt the planner would receive.
     planner_in_tokens_per_q = [0] * len(filtered_data)
     planner_out_tokens_per_q = [0] * len(filtered_data)
-    steps_tok = None  # planner tokenizer, used for token counting (and chat template if regen needed)
+    steps_tok = None
     steps_system = ("You are an information retrieval planning expert. Given a question, "
                     "generate an ordered sequence of concrete retrieval steps required to "
                     "find the answer. Each step represents one retrieval action.\n\n"
@@ -267,7 +272,8 @@ def main():
                 steps_tok.apply_chat_template(
                     [{"role": "system", "content": steps_system},
                      {"role": "user", "content": f"Question: {filtered_data[i]['Question']}"}],
-                    tokenize=False, add_generation_prompt=True)
+                    tokenize=False, add_generation_prompt=True,
+                    enable_thinking=False)
                 for i in missing_idx
             ]
             steps_sp = SamplingParams(max_tokens=1024, temperature=0.0, top_p=1.0,
@@ -303,7 +309,8 @@ def main():
             chat_prompt = steps_tok.apply_chat_template(
                 [{"role": "system", "content": steps_system},
                  {"role": "user", "content": f"Question: {item['Question']}"}],
-                tokenize=False, add_generation_prompt=True)
+                tokenize=False, add_generation_prompt=True,
+                enable_thinking=False)
             planner_in_tokens_per_q[i] = len(steps_tok(
                 chat_prompt, add_special_tokens=False)['input_ids'])
 
@@ -359,7 +366,8 @@ def main():
             f"Begin reasoning, performing searches by writing search queries as needed."
         )
         msg = [{"role": "user", "content": instruction + "\n" + user_prompt}]
-        prompt = tokenizer.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+        prompt = tokenizer.apply_chat_template(msg, tokenize=False, add_generation_prompt=True,
+                                               enable_thinking=args.thinking_mode)
         input_list.append(prompt)
 
     active_sequences = [{
@@ -504,7 +512,8 @@ def main():
         """Returns parallel lists (texts, in_tok_counts, out_tok_counts)."""
         prompts = [
             tokenizer.apply_chat_template([{"role": "user", "content": up}],
-                                          tokenize=False, add_generation_prompt=True)
+                                          tokenize=False, add_generation_prompt=True,
+                                          enable_thinking=False)
             for up in user_prompts
         ]
         outs = llm.generate(prompts, sampling_params=sp)
@@ -658,8 +667,9 @@ def main():
                 extracted_facts.append("NONE")
 
         # 5) Evaluator (sufficient / insufficient + confidence).
-        # Skip the evaluator for NONE extractions; treat as insufficient with
-        # 100% confidence so the retry budget is at its maximum for the next turn.
+        # Skip the evaluator for NONE extractions and treat them as insufficient
+        # with 100% confidence so the retry budget is at its maximum for the
+        # next turn.
         evaluator_prompts = []
         eval_indices = []
         for idx, (seq, q, fact) in enumerate(zip(batch_seqs, batch_queries, extracted_facts)):

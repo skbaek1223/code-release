@@ -1,10 +1,10 @@
 """Measure planner-only wall-clock latency per question, per dataset.
 
-Mirrors the planner block in run_re_guide.py (lines ~233-308) but times only
-the vLLM `generate()` call so model-load and tokenization costs are excluded.
-The planner is invoked as a single batched call over all questions in the
-dataset, matching production (run_re_guide.py:276). Per-question latency is
-reported as wall_time / N.
+Mirrors the planner block in run_re_guide.py but times only the vLLM
+`generate()` call so model-load and tokenization costs are excluded. The
+planner is invoked as a single batched call over all questions in the
+dataset, matching production. Per-question latency is reported as
+wall_time / N.
 
 Usage:
     # Single GPU
@@ -19,7 +19,8 @@ Usage:
         --output planner_latency.json
 
 To match production conditions for the 14B Re-Guide runs, use TP=1, since
-run_all_datasets_r1_qwen14b.py splits --gpus into per-dataset TP=1 workers.
+`run_all_datasets_model.py --preset r1_qwen14b` splits --gpus into
+per-dataset TP=1 workers.
 """
 import argparse
 import json

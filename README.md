@@ -38,11 +38,8 @@ Pipeline/
     evaluate.py
       Answer extraction, normalization, and evaluation metrics.
 
-    run_re_guide_2.py
-      Current Re-Guide runner.
-
     run_re_guide.py
-      Earlier runner version, kept for reference.
+      Re-Guide runner: the step-aware retrieval-reasoning loop.
 
     run_re_guide_extractor_fix.py
     prompts_extractor_fix.py
@@ -50,14 +47,24 @@ Pipeline/
       validation run. The main pipeline is unchanged.
 
     run_all_datasets.py
-      Multi-dataset launcher. Spawns the retriever server and vLLM workers.
+      Multi-dataset launcher. Spawns the retriever server and vLLM workers,
+      then drives run_re_guide.py once per dataset.
 
-    run_all_datasets_<model>.py
-      Per-model launcher presets for Qwen3-4B/8B/14B, R1-Llama8B, and
-      R1-Qwen14B.
+    launcher_common.py
+      Argv-patching helpers shared by the preset launchers below.
 
-    run_search_o1_wiki*.py
-      Search-o1 baseline runners.
+    run_all_datasets_model.py
+      Per-model launcher, selected with --preset {qwen3_4b, qwen3_8b,
+      qwen3_14b, r1_llama8b, r1_qwen14b}.
+
+    run_search_o1_wiki.py
+      Search-o1 baseline runner.
+
+    run_search_o1_wiki_model.py
+      Per-model Search-o1 launcher, selected with --preset {r1_llama8b,
+      r1_qwen14b}. The QwQ-32B preset lives separately at
+      rerun/run_search_o1_wiki_qwq32b.py (needs multi-GPU tensor
+      parallelism without auto-parallel dataset splitting).
 
     merge_lora.py
       Merge a trained LoRA adapter into the base model.
@@ -190,27 +197,33 @@ python Pipeline/scripts/run_all_datasets.py \
 
 If no retriever server is reachable, the launcher automatically starts one.
 
-You can also use per-model presets, for example:
+You can also use a per-model preset, for example:
 
 ```bash
-python Pipeline/scripts/run_all_datasets_qwen3_8b.py
+python Pipeline/scripts/run_all_datasets_model.py --preset qwen3_8b \
+  --gpus <vllm_gpu_ids> \
+  --retriever_gpus <retriever_gpu_ids>
 ```
+
+Available presets: `qwen3_4b`, `qwen3_8b`, `qwen3_14b`, `r1_llama8b`, `r1_qwen14b`.
 
 ---
 
 ### 5. Run Baselines
 
-Search-o1 baselines:
+Search-o1 baseline, directly or via a per-model preset:
 
 ```bash
-python Pipeline/scripts/run_search_o1_wiki*.py
+python Pipeline/scripts/run_search_o1_wiki.py \
+  --gpus <vllm_gpu_ids> \
+  --retriever_gpus <retriever_gpu_ids>
+
+python Pipeline/scripts/run_search_o1_wiki_model.py --preset r1_llama8b \
+  --gpus <vllm_gpu_ids> \
+  --retriever_gpus <retriever_gpu_ids>
 ```
 
-Other baseline launchers include:
-
-```text
-run_all_datasets_r1_*
-```
+Available presets: `r1_llama8b`, `r1_qwen14b`. The QwQ-32B Search-o1 preset lives separately at `Pipeline/scripts/rerun/run_search_o1_wiki_qwq32b.py`.
 
 ---
 
