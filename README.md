@@ -97,7 +97,7 @@ Create a `.env` file in the repository root:
 OPENAI_API_KEY=...
 ```
 
-The OpenAI API key is used for LLM-as-judge and dataset-generation steps in `Planner/precompute`.
+The OpenAI API key is used to call `gpt-4.1` for goal generation in `Planner/02_generate_goals.py`. The retrieval-step generation and judging scripts in `Planner/precompute` instead call a local vLLM server, so they don't need this key.
 
 ---
 
