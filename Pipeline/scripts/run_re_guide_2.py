@@ -96,27 +96,6 @@ def parse_args():
     p.add_argument('--budget_lambda', type=float, default=0.6)
     p.add_argument('--budget_r', type=float, default=2.0)
 
-    # Ablation switches
-    # --no_retrieval_guide: skip the planner/steps model. The user prompt is
-    #   built without a "Retrieval Guide:" section and few-shot examples are
-    #   swapped for ones that don't show one. Reasoning-guide / evaluation
-    #   module remain active.
-    # --no_reasoning_guide: skip the per-turn evaluator and the [Reasoning
-    #   Guide] system messages. The extractor still runs; its extracted
-    #   facts are injected as the search result in place of raw documents.
-    #   Retrieval guide (planner) remains active.
-    # --no_budget: keep the full reasoning-guide pipeline but omit the
-    #   "use up to N words" budget hint from the Insufficient message.
-    p.add_argument('--no_retrieval_guide', action='store_true',
-                   help="Ablation: disable the planner/steps model.")
-    p.add_argument('--no_reasoning_guide', action='store_true',
-                   help="Ablation: disable the evaluator and the "
-                        "[Reasoning Guide] system messages. Extractor "
-                        "still runs.")
-    p.add_argument('--no_budget', action='store_true',
-                   help="Ablation: omit the word-budget hint ('use up to N words') "
-                        "from the Insufficient [Reasoning Guide] message.")
-
     # Qwen3 thinking mode. When False (default), apply_chat_template receives
     # enable_thinking=False so Qwen3 skips the <think> block and responds
     # directly. Set --thinking_mode to enable internal chain-of-thought.
@@ -242,11 +221,8 @@ def main():
 
     # ----- Steps model: generate retrieval guide per question, then free -----
     retrieval_guides = ["" for _ in filtered_data]
-    if args.no_retrieval_guide:
-        args.steps_model_path = ""
     # Per-question planner token counts. OUTPUT = stripped retrieval guide;
     # INPUT = chat-templated system + user prompt the planner would receive.
-    # Both stay at 0 under --no_retrieval_guide.
     planner_in_tokens_per_q = [0] * len(filtered_data)
     planner_out_tokens_per_q = [0] * len(filtered_data)
     steps_tok = None
@@ -369,32 +345,21 @@ def main():
     for item, guide in zip(filtered_data, retrieval_guides):
         question = item['Question']
         if eval_name in MULTI_HOP_DATASETS:
-            instruction = get_multi_qa_instruction(
-                no_reasoning_guide=args.no_reasoning_guide,
-                no_retrieval_guide=args.no_retrieval_guide)
+            instruction = get_multi_qa_instruction()
         else:
-            instruction = get_single_qa_instruction(
-                no_reasoning_guide=args.no_reasoning_guide,
-                no_retrieval_guide=args.no_retrieval_guide)
-            if not args.no_retrieval_guide:
-                non_empty_lines = [l for l in guide.splitlines() if l.strip()]
-                if len(non_empty_lines) == 1:
-                    guide = re.sub(r"^\s*\d+\.\s*", "", guide).strip()
-        if args.no_retrieval_guide:
-            user_prompt = (
-                f"Question:\n{question}\n\n"
-                f"Begin reasoning, performing searches by writing search queries as needed."
-            )
-        else:
-            guide_ids = tokenizer(guide, add_special_tokens=False)['input_ids']
-            if len(guide_ids) > GUIDE_MAX_TOKENS:
-                guide = tokenizer.decode(guide_ids[:GUIDE_MAX_TOKENS], skip_special_tokens=True)
-            user_prompt = (
-                f"Question:\n{question}\n\n"
-                f"You may refer to the retrieval guide below to inform your search strategy, or feel free to take a different approach.\n\n"
-                f"Retrieval Guide:\n{guide}\n\n"
-                f"Begin reasoning, performing searches by writing search queries as needed."
-            )
+            instruction = get_single_qa_instruction()
+            non_empty_lines = [l for l in guide.splitlines() if l.strip()]
+            if len(non_empty_lines) == 1:
+                guide = re.sub(r"^\s*\d+\.\s*", "", guide).strip()
+        guide_ids = tokenizer(guide, add_special_tokens=False)['input_ids']
+        if len(guide_ids) > GUIDE_MAX_TOKENS:
+            guide = tokenizer.decode(guide_ids[:GUIDE_MAX_TOKENS], skip_special_tokens=True)
+        user_prompt = (
+            f"Question:\n{question}\n\n"
+            f"You may refer to the retrieval guide below to inform your search strategy, or feel free to take a different approach.\n\n"
+            f"Retrieval Guide:\n{guide}\n\n"
+            f"Begin reasoning, performing searches by writing search queries as needed."
+        )
         msg = [{"role": "user", "content": instruction + "\n" + user_prompt}]
         prompt = tokenizer.apply_chat_template(msg, tokenize=False, add_generation_prompt=True,
                                                enable_thinking=args.thinking_mode)
@@ -630,12 +595,8 @@ def main():
                 seq['finished'] = True
                 continue
             if query in seq['executed_search_queries']:
-                if args.no_reasoning_guide:
-                    msg = (f"\n{BEGIN_SEARCH_RESULT}\nQuery already searched. "
-                           f"Refer to previous results.\n{END_SEARCH_RESULT}\n")
-                else:
-                    msg = (f"\n{BEGIN_SEARCH_RESULT}\nQuery already searched. Refer to previous results.\n{END_SEARCH_RESULT}\n"
-                           f"[Reasoning Guide]: This query was already searched. Try a different search query to find new information.\n")
+                msg = (f"\n{BEGIN_SEARCH_RESULT}\nQuery already searched. Refer to previous results.\n{END_SEARCH_RESULT}\n"
+                       f"[Reasoning Guide]: This query was already searched. Try a different search query to find new information.\n")
                 seq['current_step'] += msg
                 seq['output'] += msg
                 commit_step(seq)
@@ -701,58 +662,47 @@ def main():
                 extracted_facts.append("NONE")
 
         # 5) Evaluator (sufficient / insufficient + confidence).
-        # Skipped entirely under --no_reasoning_guide ablation (extractor still
-        # runs above; only the evaluator + [Reasoning Guide] system message
-        # are removed). Otherwise: skip the evaluator for NONE extractions and
-        # treat them as insufficient with 100% confidence so the retry budget
-        # is at its maximum for the next turn.
-        if args.no_reasoning_guide:
-            evaluator_raw = [None] * len(batch_seqs)
+        # Skip the evaluator for NONE extractions and treat them as insufficient
+        # with 100% confidence so the retry budget is at its maximum for the
+        # next turn.
+        evaluator_prompts = []
+        eval_indices = []
+        for idx, (seq, q, fact) in enumerate(zip(batch_seqs, batch_queries, extracted_facts)):
+            if fact == "NONE":
+                continue
+            last_chunk = seq.get('last_model_chunk', '')
+            recent_reasoning = last_chunk.split(BEGIN_SEARCH_QUERY)[0].strip()
+            if not recent_reasoning:
+                recent_reasoning = seq['item']['Question']
+            evaluator_prompts.append(get_retrieval_evaluator_instruction(
+                question=seq['item']['Question'],
+                recent_reasoning=recent_reasoning,
+                search_query=q,
+                search_result=fact,
+            ))
+            eval_indices.append(idx)
+        skipped = len(batch_seqs) - len(evaluator_prompts)
+        if skipped:
+            print(f"[evaluation] skipping evaluator for {skipped} NONE extractions "
+                  f"(treated as insufficient, confidence 100%)")
+        print(f"[evaluation] judging sufficiency/confidence of extracted facts "
+              f"on {len(evaluator_prompts)} sequences")
+        if evaluator_prompts:
+            evaluator_raw_partial, evaluator_in_toks, evaluator_out_toks = llm_chat_batch(
+                evaluator_prompts, short_sampling)
         else:
-            evaluator_prompts = []
-            eval_indices = []
-            for idx, (seq, q, fact) in enumerate(zip(batch_seqs, batch_queries, extracted_facts)):
-                if fact == "NONE":
-                    continue
-                last_chunk = seq.get('last_model_chunk', '')
-                recent_reasoning = last_chunk.split(BEGIN_SEARCH_QUERY)[0].strip()
-                if not recent_reasoning:
-                    recent_reasoning = seq['item']['Question']
-                evaluator_prompts.append(get_retrieval_evaluator_instruction(
-                    question=seq['item']['Question'],
-                    recent_reasoning=recent_reasoning,
-                    search_query=q,
-                    search_result=fact,
-                ))
-                eval_indices.append(idx)
-            skipped = len(batch_seqs) - len(evaluator_prompts)
-            if skipped:
-                print(f"[evaluation] skipping evaluator for {skipped} NONE extractions "
-                      f"(treated as insufficient, confidence 100%)")
-            print(f"[evaluation] judging sufficiency/confidence of extracted facts "
-                  f"on {len(evaluator_prompts)} sequences")
-            if evaluator_prompts:
-                evaluator_raw_partial, evaluator_in_toks, evaluator_out_toks = llm_chat_batch(
-                    evaluator_prompts, short_sampling)
-            else:
-                evaluator_raw_partial, evaluator_in_toks, evaluator_out_toks = [], [], []
-            evaluator_raw = [None] * len(batch_seqs)
-            for idx, raw in zip(eval_indices, evaluator_raw_partial):
-                evaluator_raw[idx] = raw
-            for idx, n_in, n_out in zip(eval_indices, evaluator_in_toks, evaluator_out_toks):
-                batch_seqs[idx]['module_tokens']['evaluator']['input']  += n_in
-                batch_seqs[idx]['module_tokens']['evaluator']['output'] += n_out
+            evaluator_raw_partial, evaluator_in_toks, evaluator_out_toks = [], [], []
+        evaluator_raw = [None] * len(batch_seqs)
+        for idx, raw in zip(eval_indices, evaluator_raw_partial):
+            evaluator_raw[idx] = raw
+        for idx, n_in, n_out in zip(eval_indices, evaluator_in_toks, evaluator_out_toks):
+            batch_seqs[idx]['module_tokens']['evaluator']['input']  += n_in
+            batch_seqs[idx]['module_tokens']['evaluator']['output'] += n_out
 
         # 6) Inject result back into each sequence based on evaluator decision.
-        # Under --no_reasoning_guide, ev_raw is None for every seq; we record
-        # the extracted fact and inject the search-result block without any
-        # [Reasoning Guide] follow-up message.
         for seq, q, fact, ev_raw in zip(
                 batch_seqs, batch_queries, extracted_facts, evaluator_raw):
-            if args.no_reasoning_guide:
-                is_suff, conf = None, None
-                ev_raw = "[skipped: --no_reasoning_guide ablation]"
-            elif fact == "NONE":
+            if fact == "NONE":
                 is_suff, conf = False, 1.0
                 ev_raw = "[skipped: NONE extraction -> insufficient, confidence 100%]"
             else:
@@ -767,13 +717,6 @@ def main():
                 'sufficient': is_suff,
                 'confidence': conf,
             })
-
-            if args.no_reasoning_guide:
-                msg = f"\n{BEGIN_SEARCH_RESULT}\n{fact}\n{END_SEARCH_RESULT}\n"
-                seq['current_step'] += msg
-                seq['output'] += msg
-                commit_step(seq)
-                continue
 
             if is_suff:
                 if IS_MULTI_HOP:
@@ -791,16 +734,11 @@ def main():
                                   f"You now have enough information to answer the original question \"{seq['item']['Question']}\". Provide the final answer in the format \\boxed{{YOUR_ANSWER}}.")
 
             else:
-                if args.no_budget:
-                    eval_guide = (f"Insufficient (confidence {conf:.0%}).\n "
-                                  f"Feel free to explore alternative paths, such as trying a different search query or taking other retrieval steps as needed, to derive an answer to the question: {seq['item']['Question']}. "
-                                  f"Please think carefully.")
-                else:
-                    budget = compute_budget(conf, args.budget_base,
-                                            args.budget_lambda, args.budget_r)
-                    eval_guide = (f"Insufficient (confidence {conf:.0%}).\n "
-                                  f"Feel free to explore alternative paths, such as trying a different search query or taking other retrieval steps as needed, to derive an answer to the question: {seq['item']['Question']}. "
-                                  f"Please think carefully, and use up to {budget} words.")
+                budget = compute_budget(conf, args.budget_base,
+                                        args.budget_lambda, args.budget_r)
+                eval_guide = (f"Insufficient (confidence {conf:.0%}).\n "
+                              f"Feel free to explore alternative paths, such as trying a different search query or taking other retrieval steps as needed, to derive an answer to the question: {seq['item']['Question']}. "
+                              f"Please think carefully, and use up to {budget} words.")
 
             msg = (f"\n{BEGIN_SEARCH_RESULT}\n{fact}\n{END_SEARCH_RESULT}\n"
                    f"[Reasoning Guide]: {eval_guide}\n")

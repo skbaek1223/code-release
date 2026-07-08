@@ -5,7 +5,7 @@
 * **Retrieval-Guide**: a fine-tuned planner that generates a step-by-step retrieval plan before search begins.
 * **Reasoning-Guide**: a per-turn evaluator that checks whether retrieved evidence is sufficient, extracts useful facts, and injects reasoning-budget hints into the reasoning trace.
 
-This repository contains the code for training the Retrieval-Guide planner and running the Re-Guide inference pipeline, including baselines and ablation settings.
+This repository contains the code for training the Retrieval-Guide planner, running the Re-Guide inference pipeline (including baselines), and evaluating the results.
 
 See [Data](#data) for what you need to prepare to run the pipeline.
 
@@ -39,7 +39,7 @@ Pipeline/
       Answer extraction, normalization, and evaluation metrics.
 
     run_re_guide_2.py
-      Current Re-Guide runner with ablation flags.
+      Current Re-Guide runner.
 
     run_re_guide.py
       Earlier runner version, kept for reference.
@@ -52,10 +52,9 @@ Pipeline/
     run_all_datasets.py
       Multi-dataset launcher. Spawns the retriever server and vLLM workers.
 
-    run_all_datasets_<model>[_<ablation>].py
-      Per-model launcher presets for Qwen3-4B/8B/14B, R1-Llama8B,
-      R1-Qwen14B, QwQ-32B, and ablations such as reasoning_only,
-      retrieval_only, and no_budget.
+    run_all_datasets_<model>.py
+      Per-model launcher presets for Qwen3-4B/8B/14B, R1-Llama8B, and
+      R1-Qwen14B.
 
     run_search_o1_wiki*.py
       Search-o1 baseline runners.
@@ -197,16 +196,6 @@ You can also use per-model presets, for example:
 python Pipeline/scripts/run_all_datasets_qwen3_8b.py
 ```
 
-Ablation flags are documented in `Pipeline/scripts/run_re_guide_2.py`.
-
-Common ablations include:
-
-```bash
---no_retrieval_guide
---no_reasoning_guide
---no_budget
-```
-
 ---
 
 ### 5. Run Baselines
@@ -221,7 +210,6 @@ Other baseline launchers include:
 
 ```text
 run_all_datasets_r1_*
-run_all_datasets_qwq32b_*
 ```
 
 ---

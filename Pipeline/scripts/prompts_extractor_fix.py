@@ -11,8 +11,8 @@ Changes vs the original:
     documents contain neither a direct answer nor any usable intermediate fact.
 
 Used only by run_re_guide_extractor_fix.py for the small-scale validation run.
-The main pipeline's prompts.py is left untouched so existing main-table and
-ablation runs remain reproducible.
+The main pipeline's prompts.py is left untouched so existing main-table runs
+remain reproducible.
 """
 
 import prompts as _orig_prompts
