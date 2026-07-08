@@ -1,0 +1,30 @@
+{
+  "nq": {
+    "n_questions": 3610,
+    "total_wall_s": 43.2192,
+    "per_question_ms": 12.0,
+    "avg_output_tokens": 25.6,
+    "tp": 1
+  },
+  "ambigqa": {
+    "n_questions": 2002,
+    "total_wall_s": 55.3854,
+    "per_question_ms": 27.7,
+    "avg_output_tokens": 47.4,
+    "tp": 1
+  },
+  "hotpotqa": {
+    "n_questions": 7405,
+    "total_wall_s": 188.3129,
+    "per_question_ms": 25.4,
+    "avg_output_tokens": 61.5,
+    "tp": 1
+  },
+  "musique": {
+    "n_questions": 2417,
+    "total_wall_s": 87.4673,
+    "per_question_ms": 36.2,
+    "avg_output_tokens": 68.1,
+    "tp": 1
+  }
+}

@@ -1,0 +1,21 @@
+.env
+__pycache__/
+*.pyc
+
+# Large intermediate / regenerable data (not needed to reproduce the code)
+data/raw/
+data/goals/
+data/filtered/
+data/flagged/
+data/hard_selected/
+data/eval/
+data/experiments/
+data/precompute/
+data/batches/
+
+# Search caches (regenerated on first run)
+Pipeline/scripts/cache/
+Pipeline/scripts/retriever_cache/
+
+# Experiment/paper outputs (results, tables, figures) — not part of the pipeline code
+Pipeline/scripts/outputs/

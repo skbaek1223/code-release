@@ -1,0 +1,16 @@
+{
+  "triviaqa": {
+    "n_questions": 11313,
+    "total_wall_s": 289.1728,
+    "per_question_ms": 25.6,
+    "avg_output_tokens": 59.2,
+    "tp": 1
+  },
+  "2wiki": {
+    "n_questions": 12576,
+    "total_wall_s": 284.719,
+    "per_question_ms": 22.6,
+    "avg_output_tokens": 58.1,
+    "tp": 1
+  }
+}
