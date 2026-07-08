@@ -22,9 +22,6 @@ Planner/
     Planner supervised fine-tuning entry point using TRL.
 
 Pipeline/
-  data/lambda_search/
-    Reasoning-budget lambda search results.
-
   scripts/
     prompts.py
       Prompt templates for QA, retrieval evaluation, and fact extraction.
@@ -40,11 +37,6 @@ Pipeline/
 
     run_re_guide.py
       Re-Guide runner: the step-aware retrieval-reasoning loop.
-
-    run_re_guide_extractor_fix.py
-    prompts_extractor_fix.py
-      Patched extractor prompt used only for the 2WikiMQA compositional
-      validation run. The main pipeline is unchanged.
 
     run_all_datasets.py
       Multi-dataset launcher. Spawns the retriever server and vLLM workers,
@@ -68,10 +60,6 @@ Pipeline/
 
     merge_lora.py
       Merge a trained LoRA adapter into the base model.
-
-    measure_planner_latency.py
-    add_search_o1_wiki_infogen_cost.py
-      Latency and cost measurement scripts.
 
 checkpoints/qwen3-8b-planner/
   README.md
@@ -115,7 +103,6 @@ To run the pipeline you need to prepare the following:
 | ------------------------------ | -------------------------------------------------------------- |
 | `data/val/`                    | Evaluation splits for NQ, HotpotQA, and MuSiQue                 |
 | `data/sft/`                    | Planner SFT training data                                      |
-| `Pipeline/data/lambda_search/` | Reasoning-budget lambda search results                         |
 | Raw datasets                   | NQ, HotpotQA, MuSiQue, 2WikiMultihopQA, TriviaQA, and AmbigQA   |
 | FAISS index                    | Wikipedia retrieval index used by `retriever_server.py`         |
 | Wikipedia corpus               | FlashRAG `wiki18_100w` corpus                                   |
