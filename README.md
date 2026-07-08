@@ -1,79 +1,243 @@
 # Re-Guide
 
-Re-Guide augments agentic search-reasoning models with two guide modules:
-- **Retrieval-Guide**: a fine-tuned planner that produces a retrieval plan (steps) before search begins.
-- **Reasoning-Guide**: a per-turn evaluator that judges whether retrieved evidence is sufficient and injects extracted facts / budget hints into the reasoning trace.
+**Re-Guide** augments agentic search-reasoning models with two guide modules:
 
-This repository contains the code used to train the planner and run the Re-Guide inference pipeline and baselines. Raw experiment outputs, search caches, and large intermediate datasets are excluded (see [Data](#data) below).
+* **Retrieval-Guide**: a fine-tuned planner that generates a step-by-step retrieval plan before search begins.
+* **Reasoning-Guide**: a per-turn evaluator that checks whether retrieved evidence is sufficient, extracts useful facts, and injects reasoning-budget hints into the reasoning trace.
 
-## Repository layout
+This repository contains the code for training the Retrieval-Guide planner and running the Re-Guide inference pipeline, including baselines and ablation settings.
 
-```
-Planner/            Retrieval-Guide planner: training-data precompute, SFT, validation
-  precompute/        Build (question, retrieval-steps) pairs from NQ / HotpotQA and judge them
-sft/                 Planner SFT training entry point (TRL)
+See [Data](#data) for what you need to prepare to run the pipeline.
+
+---
+
+## Repository Structure
+
+```text
+Planner/
+  precompute/
+    Build question–retrieval-step pairs from NQ / HotpotQA and judge them.
+
+  sft/
+    Planner supervised fine-tuning entry point using TRL.
+
 Pipeline/
-  data/lambda_search/  Reasoning-budget lambda search results
+  data/lambda_search/
+    Reasoning-budget lambda search results.
+
   scripts/
-    prompts.py             All prompt templates (QA, retrieval evaluator, extractor)
-    retriever_server.py    FAISS + e5 retriever HTTP server (dedicated GPUs)
-    retriever_utils.py     HTTP client used by the runners
-    evaluate.py             Answer extraction / normalization / metrics
-    run_re_guide_2.py       Re-Guide runner (current), with ablation flags
-    run_re_guide.py         Earlier runner version, kept for reference
-    run_re_guide_extractor_fix.py / prompts_extractor_fix.py
-                            Patched extractor prompt used only for the 2WikiMQA
-                            compositional validation run (main pipeline untouched)
-    run_all_datasets.py     Multi-dataset launcher (spawns retriever server + vLLM workers)
+    prompts.py
+      Prompt templates for QA, retrieval evaluation, and fact extraction.
+
+    retriever_server.py
+      FAISS + e5 retriever HTTP server. Intended to run on dedicated GPUs.
+
+    retriever_utils.py
+      HTTP client used by the Re-Guide runners.
+
+    evaluate.py
+      Answer extraction, normalization, and evaluation metrics.
+
+    run_re_guide_2.py
+      Current Re-Guide runner with ablation flags.
+
+    run_re_guide.py
+      Earlier runner version, kept for reference.
+
+    run_re_guide_extractor_fix.py
+    prompts_extractor_fix.py
+      Patched extractor prompt used only for the 2WikiMQA compositional
+      validation run. The main pipeline is unchanged.
+
+    run_all_datasets.py
+      Multi-dataset launcher. Spawns the retriever server and vLLM workers.
+
     run_all_datasets_<model>[_<ablation>].py
-                            Per-model launcher presets (Qwen3-4B/8B/14B, R1-Llama8B,
-                            R1-Qwen14B, QwQ-32B) and ablations (reasoning_only,
-                            retrieval_only, no_budget)
-    run_search_o1_wiki*.py  Search-o1 baseline runners
-    merge_lora.py           Merge a trained LoRA adapter into the base model
-    measure_planner_latency.py / add_search_o1_wiki_infogen_cost.py
-                            Latency/cost measurement scripts
-checkpoints/qwen3-8b-planner/README.md   Model card for the fine-tuned planner (weights not included)
-data/val/            Evaluation sets (NQ, HotpotQA, MuSiQue)
-data/sft/            Planner SFT training data
+      Per-model launcher presets for Qwen3-4B/8B/14B, R1-Llama8B,
+      R1-Qwen14B, QwQ-32B, and ablations such as reasoning_only,
+      retrieval_only, and no_budget.
+
+    run_search_o1_wiki*.py
+      Search-o1 baseline runners.
+
+    merge_lora.py
+      Merge a trained LoRA adapter into the base model.
+
+    measure_planner_latency.py
+    add_search_o1_wiki_infogen_cost.py
+      Latency and cost measurement scripts.
+
+checkpoints/qwen3-8b-planner/
+  README.md
+    Model card for the fine-tuned planner.
+
+data/
+  val/
+    Evaluation sets for NQ, HotpotQA, and MuSiQue.
+
+  sft/
+    Planner SFT training data.
+
 requirements.txt
 ```
 
+---
+
 ## Setup
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in the repo root with:
+Create a `.env` file in the repository root:
 
-```
+```bash
 OPENAI_API_KEY=...
 ```
 
-(used for LLM-as-judge / dataset-generation steps in `Planner/precompute`).
+The OpenAI API key is used for LLM-as-judge and dataset-generation steps in `Planner/precompute`.
+
+---
 
 ## Data
 
-Included:
-- `data/val/` — evaluation splits for NQ, HotpotQA, MuSiQue
-- `data/sft/` — planner SFT training data
-- `Pipeline/data/lambda_search/` — reasoning-budget lambda search results
+To run the pipeline you need to prepare the following:
 
-Not included (regenerate locally, or point scripts at your own copies):
-- Raw dataset downloads (NQ, HotpotQA, MuSiQue, 2WikiMultihopQA, TriviaQA, AmbigQA) — see `Planner/precompute/01_a_load_nq.py` / `01_b_load_hotpotqa.py` for the expected format.
-- A FAISS retrieval index + Wikipedia corpus for `retriever_server.py`. This code uses the [FlashRAG](https://github.com/RUC-NLPIR/FlashRAG) `wiki18_100w` corpus with an `e5-base-v2` flat inner-product index; `retriever_server.py`'s `--index_path` / `--corpus_path` default to this machine's local paths and must be overridden.
-- Search-result caches and run outputs (`Pipeline/scripts/cache/`, `retriever_cache/`, `outputs/`) — regenerated on first run.
+| Resource                      | Description                                                    |
+| ------------------------------ | -------------------------------------------------------------- |
+| `data/val/`                    | Evaluation splits for NQ, HotpotQA, and MuSiQue                 |
+| `data/sft/`                    | Planner SFT training data                                      |
+| `Pipeline/data/lambda_search/` | Reasoning-budget lambda search results                         |
+| Raw datasets                   | NQ, HotpotQA, MuSiQue, 2WikiMultihopQA, TriviaQA, and AmbigQA   |
+| FAISS index                    | Wikipedia retrieval index used by `retriever_server.py`         |
+| Wikipedia corpus               | FlashRAG `wiki18_100w` corpus                                   |
+| Search caches                  | `Pipeline/scripts/cache/`, `retriever_cache/`                   |
+| Run outputs                    | `outputs/`                                                      |
+
+For raw dataset formats, see:
+
+```text
+Planner/precompute/01_a_load_nq.py
+Planner/precompute/01_b_load_hotpotqa.py
+```
+
+The retriever uses the [FlashRAG](https://github.com/RUC-NLPIR/FlashRAG) `wiki18_100w` corpus with an `e5-base-v2` flat inner-product index. The default `--index_path` and `--corpus_path` values in `retriever_server.py` are local machine paths and should be overridden.
+
+---
 
 ## Pipeline
 
-1. **Planner training data**: `Planner/precompute/01_*.py` → `02_*.py` (generate retrieval steps) → `03_*.py` (LLM-judge the steps) → `04_extract_hard.py` (extract the hard subset used for SFT).
-2. **Planner SFT**: `Planner/04_sft_data_and_train.py` or `sft/train.py`, then `Pipeline/scripts/merge_lora.py` to merge the LoRA adapter into the base model.
-3. **Retriever server**: `python Pipeline/scripts/retriever_server.py --gpus <ids> --index_path <path> --corpus_path <path>`. Runs on dedicated GPUs, independent of the vLLM workers.
-4. **Re-Guide inference**: `python Pipeline/scripts/run_all_datasets.py --gpus <ids> --retriever_gpus <ids>` (auto-spawns the retriever server if none is reachable), or one of the per-model presets, e.g. `run_all_datasets_qwen3_8b.py`. Ablation flags (`--no_retrieval_guide`, `--no_reasoning_guide`, `--no_budget`) are documented in `run_re_guide_2.py`.
-5. **Baselines**: `run_search_o1_wiki*.py`, `run_all_datasets_r1_*`, `run_all_datasets_qwq32b_*`.
-6. **Evaluation**: `Pipeline/scripts/evaluate.py` (invoked by the runners; can also be run standalone on saved outputs).
+### 1. Generate Planner Training Data
+
+Run the scripts in `Planner/precompute`:
+
+```text
+01_*.py  -> load raw datasets
+02_*.py  -> generate retrieval steps
+03_*.py  -> judge retrieval steps using LLM-as-judge
+04_extract_hard.py -> extract the hard subset used for SFT
+```
+
+---
+
+### 2. Train the Retrieval-Guide Planner
+
+You can train the planner using either:
+
+```bash
+python Planner/04_sft_data_and_train.py
+```
+
+or:
+
+```bash
+python Planner/sft/train.py
+```
+
+After training, merge the LoRA adapter into the base model:
+
+```bash
+python Pipeline/scripts/merge_lora.py
+```
+
+---
+
+### 3. Start the Retriever Server
+
+Run the retriever server with dedicated GPUs:
+
+```bash
+python Pipeline/scripts/retriever_server.py \
+  --gpus <retriever_gpu_ids> \
+  --index_path <path_to_faiss_index> \
+  --corpus_path <path_to_wikipedia_corpus>
+```
+
+The retriever server runs independently of the vLLM workers.
+
+---
+
+### 4. Run Re-Guide Inference
+
+Run the full multi-dataset pipeline:
+
+```bash
+python Pipeline/scripts/run_all_datasets.py \
+  --gpus <vllm_gpu_ids> \
+  --retriever_gpus <retriever_gpu_ids>
+```
+
+If no retriever server is reachable, the launcher automatically starts one.
+
+You can also use per-model presets, for example:
+
+```bash
+python Pipeline/scripts/run_all_datasets_qwen3_8b.py
+```
+
+Ablation flags are documented in `Pipeline/scripts/run_re_guide_2.py`.
+
+Common ablations include:
+
+```bash
+--no_retrieval_guide
+--no_reasoning_guide
+--no_budget
+```
+
+---
+
+### 5. Run Baselines
+
+Search-o1 baselines:
+
+```bash
+python Pipeline/scripts/run_search_o1_wiki*.py
+```
+
+Other baseline launchers include:
+
+```text
+run_all_datasets_r1_*
+run_all_datasets_qwq32b_*
+```
+
+---
+
+### 6. Evaluate Results
+
+Evaluation is automatically invoked by the runners, but it can also be run standalone:
+
+```bash
+python Pipeline/scripts/evaluate.py
+```
+
+The evaluation script handles answer extraction, normalization, and metric computation.
+
+---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+This project is released under the MIT License. See [LICENSE](LICENSE).
