@@ -40,23 +40,17 @@ Pipeline/
 
     run_all_datasets.py
       Multi-dataset launcher. Spawns the retriever server and vLLM workers,
-      then drives run_re_guide.py once per dataset.
-
-    launcher_common.py
-      Argv-patching helpers shared by the preset launchers below.
-
-    run_all_datasets_model.py
-      Per-model launcher, selected with --preset {qwen3_4b, qwen3_8b,
-      qwen3_14b, r1_llama8b, r1_qwen14b}.
+      then drives run_re_guide.py once per dataset. Supports --preset
+      {qwen3_4b, qwen3_8b, qwen3_14b, r1_llama8b, r1_qwen14b} to switch models.
 
     run_search_o1_wiki.py
-      Search-o1 baseline runner.
+      Search-o1 baseline runner. Supports --preset {r1_llama8b, r1_qwen14b}.
+      The QwQ-32B preset lives separately at rerun/run_search_o1_wiki_qwq32b.py
+      (needs multi-GPU tensor parallelism without auto-parallel dataset
+      splitting).
 
-    run_search_o1_wiki_model.py
-      Per-model Search-o1 launcher, selected with --preset {r1_llama8b,
-      r1_qwen14b}. The QwQ-32B preset lives separately at
-      rerun/run_search_o1_wiki_qwq32b.py (needs multi-GPU tensor
-      parallelism without auto-parallel dataset splitting).
+    launcher_common.py
+      Argv-patching helpers used by run_search_o1_wiki.py's --preset support.
 
     merge_lora.py
       Merge a trained LoRA adapter into the base model.
@@ -67,7 +61,11 @@ checkpoints/qwen3-8b-planner/
 
 data/
   val/
-    Evaluation sets for NQ, HotpotQA, and MuSiQue.
+    Planner validation splits for NQ, HotpotQA, and MuSiQue.
+
+  eval/
+    Full-pipeline evaluation splits for NQ, AmbigQA, TriviaQA, HotpotQA,
+    2WikiMultihopQA, and MuSiQue.
 
   sft/
     Planner SFT training data.
@@ -99,15 +97,16 @@ The OpenAI API key is used to call `gpt-4.1` for goal generation in `Planner/02_
 
 To run the pipeline you need to prepare the following:
 
-| Resource                      | Description                                                    |
-| ------------------------------ | -------------------------------------------------------------- |
-| `data/val/`                    | Evaluation splits for NQ, HotpotQA, and MuSiQue                 |
-| `data/sft/`                    | Planner SFT training data                                      |
-| Raw datasets                   | NQ, HotpotQA, MuSiQue, 2WikiMultihopQA, TriviaQA, and AmbigQA   |
-| FAISS index                    | Wikipedia retrieval index used by `retriever_server.py`         |
-| Wikipedia corpus               | FlashRAG `wiki18_100w` corpus                                   |
-| Search caches                  | `Pipeline/scripts/cache/`, `retriever_cache/`                   |
-| Run outputs                    | `outputs/`                                                      |
+| Resource                    | Description                                                                |
+| --------------------------- | --------------------------------------------------------------------------- |
+| `data/sft/`                 | Planner SFT training data                                                    |
+| Raw train datasets          | NQ and HotpotQA train splits — input to `Planner/precompute`, which builds the SFT data above |
+| `data/val/`                 | Planner validation splits for NQ, HotpotQA, and MuSiQue                     |
+| `data/eval/`                | Full-pipeline evaluation splits for NQ, AmbigQA, TriviaQA, HotpotQA, 2WikiMultihopQA, and MuSiQue — used by `run_all_datasets.py` / `run_search_o1_wiki.py` |
+| FAISS index                 | Wikipedia retrieval index used by `retriever_server.py`                      |
+| Wikipedia corpus            | FlashRAG `wiki18_100w` corpus                                                |
+
+Search caches (`Pipeline/scripts/cache/`, `retriever_cache/`) and run outputs (`outputs/`) are not something you prepare — they're generated automatically as the pipeline runs.
 
 For raw dataset formats, see:
 
@@ -121,6 +120,8 @@ The retriever uses the [FlashRAG](https://github.com/RUC-NLPIR/FlashRAG) `wiki18
 ---
 
 ## Pipeline
+
+Commands below that aren't under `Planner/` are run from `Pipeline/scripts/`.
 
 ### 1. Generate Planner Training Data
 
@@ -152,7 +153,7 @@ python Planner/sft/train.py
 After training, merge the LoRA adapter into the base model:
 
 ```bash
-python Pipeline/scripts/merge_lora.py
+python merge_lora.py
 ```
 
 ---
@@ -162,7 +163,7 @@ python Pipeline/scripts/merge_lora.py
 Run the retriever server with dedicated GPUs:
 
 ```bash
-python Pipeline/scripts/retriever_server.py \
+python retriever_server.py \
   --gpus <retriever_gpu_ids> \
   --index_path <path_to_faiss_index> \
   --corpus_path <path_to_wikipedia_corpus>
@@ -174,10 +175,10 @@ The retriever server runs independently of the vLLM workers.
 
 ### 4. Run Re-Guide Inference
 
-Run the full multi-dataset pipeline:
+Run the full multi-dataset pipeline (QwQ-32B by default):
 
 ```bash
-python Pipeline/scripts/run_all_datasets.py \
+python run_all_datasets.py \
   --gpus <vllm_gpu_ids> \
   --retriever_gpus <retriever_gpu_ids>
 ```
@@ -187,7 +188,7 @@ If no retriever server is reachable, the launcher automatically starts one.
 You can also use a per-model preset, for example:
 
 ```bash
-python Pipeline/scripts/run_all_datasets_model.py --preset qwen3_8b \
+python run_all_datasets.py --preset qwen3_8b \
   --gpus <vllm_gpu_ids> \
   --retriever_gpus <retriever_gpu_ids>
 ```
@@ -198,19 +199,19 @@ Available presets: `qwen3_4b`, `qwen3_8b`, `qwen3_14b`, `r1_llama8b`, `r1_qwen14
 
 ### 5. Run Baselines
 
-Search-o1 baseline, directly or via a per-model preset:
+Search-o1 baseline (QwQ-32B by default), directly or via a per-model preset:
 
 ```bash
-python Pipeline/scripts/run_search_o1_wiki.py \
+python run_search_o1_wiki.py \
   --gpus <vllm_gpu_ids> \
   --retriever_gpus <retriever_gpu_ids>
 
-python Pipeline/scripts/run_search_o1_wiki_model.py --preset r1_llama8b \
+python run_search_o1_wiki.py --preset r1_llama8b \
   --gpus <vllm_gpu_ids> \
   --retriever_gpus <retriever_gpu_ids>
 ```
 
-Available presets: `r1_llama8b`, `r1_qwen14b`. The QwQ-32B Search-o1 preset lives separately at `Pipeline/scripts/rerun/run_search_o1_wiki_qwq32b.py`.
+Available presets: `r1_llama8b`, `r1_qwen14b`. The QwQ-32B Search-o1 preset lives separately at `rerun/run_search_o1_wiki_qwq32b.py`.
 
 ---
 
@@ -219,7 +220,7 @@ Available presets: `r1_llama8b`, `r1_qwen14b`. The QwQ-32B Search-o1 preset live
 Evaluation is automatically invoked by the runners, but it can also be run standalone:
 
 ```bash
-python Pipeline/scripts/evaluate.py
+python evaluate.py
 ```
 
 The evaluation script handles answer extraction, normalization, and metric computation.

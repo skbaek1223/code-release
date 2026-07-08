@@ -8,7 +8,7 @@ Architecture:
       server is already running, it is reused and NOT torn down on exit.
     - Each worker loads vLLM ONCE on its assigned GPUs and never swaps.
 
-Sequential mode (single worker, default):
+Sequential mode (single worker, default; QwQ-32B unless --preset is given):
     python run_all_datasets.py --gpus 2,3 --retriever_gpus 0,1
     python run_all_datasets.py --gpus 2,3 --retriever_gpus 0,1 --dataset hotpotqa,musique,2wiki,nq,triviaqa,ambigqa
 
@@ -20,6 +20,30 @@ Parallel mode (multiple independent workers, one GPU group each):
     # tail two launch logs at once
     tail -f /mnt/raid6/skbaek1223/project/Re-Guide/Pipeline/scripts/outputs/final_results/triviaqa.qwq-32b.re_guide.launch.log \\
             /mnt/raid6/skbaek1223/project/Re-Guide/Pipeline/scripts/outputs/final_results/hotpotqa.qwq-32b.re_guide.launch.log
+
+Per-model presets (--preset <name>): injects the model path, context window,
+and sampling defaults for a specific model, then applies one-GPU-per-dataset
+auto-parallelization when --gpus is given (pass --no_auto_parallel to force
+tensor parallelism across all listed GPUs on a single dataset instead). Any
+flag you pass explicitly still takes precedence over the preset's defaults.
+
+    qwen3_4b     Qwen3-4B.  max_model_len=32768, max_new_tokens=16384,
+                 temperature=0.6, retry-word budget 30 (single-hop) / 45
+                 (multi-hop), thinking_mode forced on. Datasets: nq, ambigqa,
+                 hotpotqa, musique.
+    qwen3_8b     Qwen3-8B.  Same shape as qwen3_4b. The fine-tuned planner
+                 checkpoint (planner-5050-5000/final_merged) is also
+                 Qwen3-8B based and shared across all Qwen3 runs.
+    qwen3_14b    Qwen3-14B. Same shape as qwen3_4b but uses the default
+                 60/90 retry-word budget (no override).
+    r1_llama8b   DeepSeek-R1-Distill-Llama-8B. Retry-word budget 30/45.
+                 Runs all 8 dataset entries except the triviaqa_a/_b split
+                 (plain triviaqa only).
+    r1_qwen14b   DeepSeek-R1-Distill-Qwen-14B. Default 60/90 budget. Same
+                 dataset selection as r1_llama8b.
+
+    python run_all_datasets.py --preset qwen3_8b --gpus 6,7 --retriever_gpus 0,1
+    python run_all_datasets.py --preset r1_llama8b --gpus 6 --retriever_gpus 0,1 --dataset musique
 """
 
 import argparse
@@ -59,6 +83,49 @@ DATASETS = [
     ("musique",     "musique_dev.json",     "dev"),
 ]
 
+MULTI_HOP_DATASETS = {"hotpotqa", "2wiki", "musique"}
+QWEN3_DATASETS = {"nq", "ambigqa", "hotpotqa", "musique"}
+TRIVIAQA_SPLIT = {"triviaqa_a", "triviaqa_b"}
+
+# ── Per-model presets ────────────────────────────────────────────────────
+PRESETS = {
+    "qwen3_4b": dict(
+        model_path="/mnt/raid6/skbaek1223/models/Qwen3-4B",
+        max_model_len=32768, max_new_tokens=16384, temperature=0.6,
+        budget_singlehop=30, budget_multihop=45,
+        thinking_mode=True,
+        keep_datasets=QWEN3_DATASETS,
+    ),
+    "qwen3_8b": dict(
+        model_path="/mnt/raid6/skbaek1223/models/Qwen3-8B",
+        max_model_len=32768, max_new_tokens=16384, temperature=0.6,
+        budget_singlehop=30, budget_multihop=45,
+        thinking_mode=True,
+        keep_datasets=QWEN3_DATASETS,
+    ),
+    "qwen3_14b": dict(
+        model_path="/mnt/raid6/skbaek1223/models/Qwen3-14B",
+        max_model_len=32768, max_new_tokens=16384, temperature=0.6,
+        thinking_mode=True,
+        keep_datasets=QWEN3_DATASETS,
+    ),
+    "r1_llama8b": dict(
+        model_path="/mnt/raid6/skbaek1223/models/DeepSeek-R1-Distill-Llama-8B",
+        max_model_len=32768, max_new_tokens=16384, temperature=0.6,
+        budget_singlehop=30, budget_multihop=45,
+        skip_datasets=TRIVIAQA_SPLIT,
+    ),
+    "r1_qwen14b": dict(
+        model_path="/mnt/raid6/skbaek1223/models/DeepSeek-R1-Distill-Qwen-14B",
+        max_model_len=32768, max_new_tokens=16384, temperature=0.6,
+        skip_datasets=TRIVIAQA_SPLIT,
+    ),
+}
+
+# Set by main() from --preset; read by build_cmd() to inject --budget_base /
+# --thinking_mode into the per-dataset worker command.
+_ACTIVE_PRESET = {}
+
 
 # ── Worker command construction ────────────────────────────────────────
 def build_cmd(args, dataset_name, data_file, split, retriever_url):
@@ -88,6 +155,12 @@ def build_cmd(args, dataset_name, data_file, split, retriever_url):
         cmd += ["--steps_model_path", args.steps_model_path]
     if args.subset_num != -1:
         cmd += ["--subset_num", str(args.subset_num)]
+    if "budget_singlehop" in _ACTIVE_PRESET:
+        budget = (_ACTIVE_PRESET["budget_multihop"] if dataset_name in MULTI_HOP_DATASETS
+                  else _ACTIVE_PRESET["budget_singlehop"])
+        cmd += ["--budget_base", str(budget)]
+    if _ACTIVE_PRESET.get("thinking_mode"):
+        cmd += ["--thinking_mode"]
     return cmd, qa_data_path, dataset_output_dir
 
 
@@ -193,34 +266,40 @@ def run_parallel(args, run_datasets, retriever_url):
 
 
 def main():
+    global _ACTIVE_PRESET
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str,
-                        default="/mnt/raid6/skbaek1223/models/QwQ-32B",
-                        help="Path to the main reasoning LLM.")
+    parser.add_argument("--preset", type=str, default=None, choices=sorted(PRESETS),
+                        help="Per-model preset; see module docstring for details.")
+    parser.add_argument("--no_auto_parallel", action="store_true",
+                        help="With --preset, disable one-GPU-per-dataset auto-parallelization.")
+    parser.add_argument("--model_path", type=str, default=None,
+                        help="Path to the main reasoning LLM. "
+                             "Default: the preset's model, or QwQ-32B.")
     parser.add_argument("--steps_model_path", type=str, default=DEFAULT_STEPS_MODEL,
                         help="Path to the planner model.")
     parser.add_argument("--subset_num", type=int, default=-1,
                         help="Limit samples per dataset (-1 = all).")
     parser.add_argument("--dataset", type=str, default=None,
                         help="Run specific dataset(s). Comma-separated list allowed "
-                             "(e.g. 'nq,triviaqa,hotpotqa'). If omitted, run all 6.")
+                             "(e.g. 'nq,triviaqa,hotpotqa'). If omitted, run all "
+                             "(or the preset's subset).")
     parser.add_argument("--max_turn", type=int, default=20)
     parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--max_search_limit", type=int, default=20)
-    parser.add_argument("--max_model_len", type=int, default=40960)
-    parser.add_argument("--max_new_tokens", type=int, default=16384)
-    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--max_model_len", type=int, default=None)
+    parser.add_argument("--max_new_tokens", type=int, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
 
     # Sequential mode: GPUs for the single vLLM worker.
-    parser.add_argument("--gpus", type=str, default="2,3",
+    parser.add_argument("--gpus", type=str, default=None,
                         help="Comma-separated GPU ids for vLLM (sequential mode). "
-                             "Must NOT overlap --retriever_gpus.")
+                             "Must NOT overlap --retriever_gpus. Default: 2,3.")
 
     # Parallel mode: each group is an independent vLLM worker.
     parser.add_argument("--parallel", action="store_true",
                         help="Run datasets concurrently; each GPU group is an independent "
                              "vLLM worker.")
-    parser.add_argument("--gpu_groups", type=str, default="2,3;4,5;6,7",
+    parser.add_argument("--gpu_groups", type=str, default=None,
                         help="Semicolon-separated vLLM GPU groups. "
                              "Example: '2,3;4,5;6,7'. Must NOT overlap --retriever_gpus.")
 
@@ -235,16 +314,48 @@ def main():
                         help="Seconds to wait for retriever /health after spawn.")
     args = parser.parse_args()
 
+    cfg = PRESETS.get(args.preset, {})
+    _ACTIVE_PRESET = cfg
+
+    if args.model_path is None:
+        args.model_path = cfg.get("model_path", "/mnt/raid6/skbaek1223/models/QwQ-32B")
+    if args.max_model_len is None:
+        args.max_model_len = cfg.get("max_model_len", 40960)
+    if args.max_new_tokens is None:
+        args.max_new_tokens = cfg.get("max_new_tokens", 16384)
+    if args.temperature is None:
+        args.temperature = cfg.get("temperature", 0.7)
+
+    # One GPU per dataset in parallel by default when a preset is active.
+    if (args.preset and not args.no_auto_parallel and not args.parallel
+            and args.gpu_groups is None and args.gpus):
+        gpu_list = [g.strip() for g in args.gpus.split(",") if g.strip()]
+        if len(gpu_list) >= 2:
+            args.parallel = True
+            args.gpu_groups = ";".join(gpu_list)
+
+    if args.gpus is None:
+        args.gpus = "2,3"
+    if args.gpu_groups is None:
+        args.gpu_groups = "2,3;4,5;6,7"
+
+    if "keep_datasets" in cfg:
+        dataset_pool = [d for d in DATASETS if d[0] in cfg["keep_datasets"]]
+    elif "skip_datasets" in cfg:
+        dataset_pool = [d for d in DATASETS if d[0] not in cfg["skip_datasets"]]
+    else:
+        dataset_pool = DATASETS
+
     if args.dataset:
         requested = [d.strip() for d in args.dataset.split(",") if d.strip()]
-        valid = {n for n, _, _ in DATASETS}
+        valid = {n for n, _, _ in dataset_pool}
         unknown = [d for d in requested if d not in valid]
         if unknown:
             raise SystemExit(f"Unknown dataset(s): {unknown}. Valid: {sorted(valid)}")
-        by_name = {n: (n, f, s) for n, f, s in DATASETS}
+        by_name = {n: (n, f, s) for n, f, s in dataset_pool}
         run_datasets = [by_name[d] for d in requested]
     else:
-        run_datasets = DATASETS
+        run_datasets = dataset_pool
 
     # GPU overlap sanity check.
     retriever_set = {g.strip() for g in args.retriever_gpus.split(",") if g.strip()}

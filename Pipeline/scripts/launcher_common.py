@@ -1,10 +1,16 @@
-"""Shared argv-patching helpers for the run_all_datasets_model.py and
-run_search_o1_wiki_model.py preset launchers.
+"""Argv-patching helpers for run_search_o1_wiki.py's --preset support.
 
-Both launchers work by mutating sys.argv before importing and calling into
-the underlying script's main() (run_all_datasets.py / run_search_o1_wiki.py),
-so that script's own argparse picks up the injected defaults. Any flag the
-user already passed on the command line takes precedence.
+run_search_o1_wiki.py must set CUDA_VISIBLE_DEVICES from --gpus/--gpu_groups
+before it imports torch/vllm, so its --preset resolution has to mutate
+sys.argv up front (before argparse ever runs), rather than post-process a
+parsed Namespace. These helpers implement that: inject preset flag defaults
+into sys.argv unless already present, and split a single --gpus list into
+one-GPU-per-dataset --parallel groups. Any flag the user already passed on
+the command line takes precedence.
+
+run_all_datasets.py doesn't have that early CUDA-visible-devices constraint,
+so it resolves --preset directly on the parsed argparse Namespace instead
+and doesn't use this module.
 """
 import sys
 

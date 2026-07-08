@@ -20,9 +20,64 @@ Usage:
     # parallel workers (each group runs one dataset in parallel)
     python run_search_o1_wiki.py --parallel \\
         --retriever_gpus 0,1 --gpu_groups "2,3;4,5;6,7"
+
+Per-model presets (--preset <name>): injects the model path and sampling
+defaults for a specific model, then applies one-GPU-per-dataset
+auto-parallelization when --gpus is given (pass --no_auto_parallel to force
+tensor parallelism across all listed GPUs on a single dataset instead). Any
+flag you pass explicitly still takes precedence over the preset's defaults.
+
+    r1_llama8b   DeepSeek-R1-Distill-Llama-8B. The model has 131k native
+                 context via llama3 RoPE scaling, so larger windows than
+                 the default are also valid if KV cache budget allows.
+    r1_qwen14b   DeepSeek-R1-Distill-Qwen-14B. Base Qwen2.5 has 131k native
+                 context, same headroom note as r1_llama8b.
+
+    python run_search_o1_wiki.py --preset r1_llama8b --gpus 6,7 --retriever_gpus 4,5
+    python run_search_o1_wiki.py --preset r1_qwen14b --gpus 6 --retriever_gpus 0,1 --dataset 2wiki,musique
+
+The QwQ-32B Search-o1 preset lives separately at
+rerun/run_search_o1_wiki_qwq32b.py: it needs multi-GPU tensor parallelism
+without the auto-parallel dataset splitting this preset mechanism applies.
 """
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from launcher_common import apply_preset, auto_parallelize_gpus, flag_value, remove_flag
+
+# ── Per-model presets ────────────────────────────────────────────────────
+# Resolved via sys.argv (before argparse, and before _early_set_cuda_visible_devices()
+# below reads --gpus/--gpu_groups) so preset-driven auto-parallelization is
+# already reflected in the raw CLI args by the time CUDA_VISIBLE_DEVICES is set.
+PRESETS = {
+    "r1_llama8b": {
+        "--model_path":         "/mnt/raid6/skbaek1223/models/DeepSeek-R1-Distill-Llama-8B",
+        "--max_model_len":      "32768",
+        "--max_new_tokens":     "16384",
+        "--temperature":        "0.6",
+        "--top_p":              "0.95",
+        "--top_k_sampling":     "20",
+        "--repetition_penalty": "1.0",
+    },
+    "r1_qwen14b": {
+        "--model_path":         "/mnt/raid6/skbaek1223/models/DeepSeek-R1-Distill-Qwen-14B",
+        "--max_model_len":      "32768",
+        "--max_new_tokens":     "16384",
+        "--temperature":        "0.6",
+        "--top_p":              "0.95",
+        "--top_k_sampling":     "20",
+        "--repetition_penalty": "1.0",
+    },
+}
+
+_preset_name = flag_value("--preset")
+if _preset_name is not None:
+    if _preset_name not in PRESETS:
+        raise SystemExit(f"--preset must be one of {sorted(PRESETS)}, got {_preset_name!r}")
+    remove_flag("--preset")
+    apply_preset(PRESETS[_preset_name])
+    auto_parallelize_gpus()
 
 
 def _early_set_cuda_visible_devices():
@@ -288,6 +343,14 @@ def parse_args():
     p.add_argument('--gpu_groups', type=str, default='2,3;4,5;6,7',
                    help="Semicolon-separated vLLM GPU groups. "
                         "Example: '2,3;4,5;6,7'. Must NOT overlap --retriever_gpus.")
+
+    # --preset and --no_auto_parallel are resolved from sys.argv before this
+    # parser ever runs (see the top of the module) and are registered here
+    # only so they show up in --help.
+    p.add_argument('--preset', type=str, default=None, choices=sorted(PRESETS),
+                   help="Per-model preset; see module docstring for details.")
+    p.add_argument('--no_auto_parallel', action='store_true',
+                   help="With --preset, disable one-GPU-per-dataset auto-parallelization.")
 
     return p.parse_args()
 
