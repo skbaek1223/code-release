@@ -18,8 +18,8 @@ Parallel mode (multiple independent workers, one GPU group each):
         --retriever_gpus 0,1 --gpu_groups "2,3;4,5;6,7"
 
     # tail two launch logs at once
-    tail -f /mnt/raid6/skbaek1223/project/Re-Guide/Pipeline/scripts/outputs/final_results/triviaqa.qwq-32b.re_guide.launch.log \\
-            /mnt/raid6/skbaek1223/project/Re-Guide/Pipeline/scripts/outputs/final_results/hotpotqa.qwq-32b.re_guide.launch.log
+    tail -f /mnt/raid6/skbaek1223/project/Re-Guide/scripts/outputs/final_results/triviaqa.qwq-32b.re_guide.launch.log \\
+            /mnt/raid6/skbaek1223/project/Re-Guide/scripts/outputs/final_results/hotpotqa.qwq-32b.re_guide.launch.log
 
 Per-model presets (--preset <name>): injects the model path, context window,
 and sampling defaults for a specific model, then applies one-GPU-per-dataset
@@ -64,10 +64,10 @@ RETRIEVER_SERVER_PATH = os.path.join(PROJECT_ROOT, "retriever_server.py")
 
 sys.path.insert(0, PROJECT_ROOT)
 from retriever_utils import ensure_retriever_server, stop_retriever_server
-DATA_DIR = os.path.join(PROJECT_ROOT, "..", "..", "data", "eval")
+DATA_DIR = os.path.join(PROJECT_ROOT, "..", "data", "eval")
 FINAL_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs", "final_results")
 DEFAULT_STEPS_MODEL = os.path.join(
-    PROJECT_ROOT, "..", "..", "data", "experiments", "S7000", "checkpoints", "final_merged"
+    PROJECT_ROOT, "..", "data", "experiments", "S7000", "checkpoints", "final_merged"
 )
 
 # ── Dataset definitions ────────────────────────────────────────────────

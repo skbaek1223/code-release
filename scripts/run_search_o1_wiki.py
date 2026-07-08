@@ -35,10 +35,6 @@ flag you pass explicitly still takes precedence over the preset's defaults.
 
     python run_search_o1_wiki.py --preset r1_llama8b --gpus 6,7 --retriever_gpus 4,5
     python run_search_o1_wiki.py --preset r1_qwen14b --gpus 6 --retriever_gpus 0,1 --dataset 2wiki,musique
-
-The QwQ-32B Search-o1 preset lives separately at
-rerun/run_search_o1_wiki_qwq32b.py: it needs multi-GPU tensor parallelism
-without the auto-parallel dataset splitting this preset mechanism applies.
 """
 import os
 import sys
@@ -147,7 +143,7 @@ MULTI_HOP_DATASETS = {'hotpotqa', '2wiki', 'musique'}
 
 # ── Dataset table (used when --qa_data_path is not supplied) ───────────────
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DATA_DIR = os.path.normpath(os.path.join(PROJECT_ROOT, "..", "..", "data", "eval"))
+DEFAULT_DATA_DIR = os.path.normpath(os.path.join(PROJECT_ROOT, "..", "data", "eval"))
 DEFAULT_FINAL_OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs", "final_results")
 
 DATASETS = [

@@ -14,8 +14,8 @@ data/precompute/
 data/batches/
 
 # Search caches (regenerated on first run)
-Pipeline/scripts/cache/
-Pipeline/scripts/retriever_cache/
+scripts/cache/
+scripts/retriever_cache/
 
 # Experiment/paper outputs (results, tables, figures) — not part of the pipeline code
-Pipeline/scripts/outputs/
+scripts/outputs/

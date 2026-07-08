@@ -72,7 +72,7 @@ def parse_args():
     # Model / sampling (main reasoning LLM)
     p.add_argument('--model_path', type=str, default='/mnt/raid6/skbaek1223/models/QwQ-32B')
     p.add_argument('--steps_model_path', type=str,
-                   default=os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'experiments', 'S7000', 'checkpoints', 'final_merged'),
+                   default=os.path.join(os.path.dirname(__file__), '..', 'data', 'experiments', 'S7000', 'checkpoints', 'final_merged'),
                    help="Fine-tuned planner model that emits a numbered retrieval guide per question.")
     p.add_argument('--temperature', type=float, default=0.7)
     p.add_argument('--top_p', type=float, default=0.8)

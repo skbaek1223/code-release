@@ -21,39 +21,35 @@ Planner/
   sft/
     Planner supervised fine-tuning entry point using TRL.
 
-Pipeline/
-  scripts/
-    prompts.py
-      Prompt templates for QA, retrieval evaluation, and fact extraction.
+scripts/
+  prompts.py
+    Prompt templates for QA, retrieval evaluation, and fact extraction.
 
-    retriever_server.py
-      FAISS + e5 retriever HTTP server. Intended to run on dedicated GPUs.
+  retriever_server.py
+    FAISS + e5 retriever HTTP server. Intended to run on dedicated GPUs.
 
-    retriever_utils.py
-      HTTP client used by the Re-Guide runners.
+  retriever_utils.py
+    HTTP client used by the Re-Guide runners.
 
-    evaluate.py
-      Answer extraction, normalization, and evaluation metrics.
+  evaluate.py
+    Answer extraction, normalization, and evaluation metrics.
 
-    run_re_guide.py
-      Re-Guide runner: the step-aware retrieval-reasoning loop.
+  run_re_guide.py
+    Re-Guide runner: the step-aware retrieval-reasoning loop.
 
-    run_all_datasets.py
-      Multi-dataset launcher. Spawns the retriever server and vLLM workers,
-      then drives run_re_guide.py once per dataset. Supports --preset
-      {qwen3_4b, qwen3_8b, qwen3_14b, r1_llama8b, r1_qwen14b} to switch models.
+  run_all_datasets.py
+    Multi-dataset launcher. Spawns the retriever server and vLLM workers,
+    then drives run_re_guide.py once per dataset. Supports --preset
+    {qwen3_4b, qwen3_8b, qwen3_14b, r1_llama8b, r1_qwen14b} to switch models.
 
-    run_search_o1_wiki.py
-      Search-o1 baseline runner. Supports --preset {r1_llama8b, r1_qwen14b}.
-      The QwQ-32B preset lives separately at rerun/run_search_o1_wiki_qwq32b.py
-      (needs multi-GPU tensor parallelism without auto-parallel dataset
-      splitting).
+  run_search_o1_wiki.py
+    Search-o1 baseline runner. Supports --preset {r1_llama8b, r1_qwen14b}.
 
-    launcher_common.py
-      Argv-patching helpers used by run_search_o1_wiki.py's --preset support.
+  launcher_common.py
+    Argv-patching helpers used by run_search_o1_wiki.py's --preset support.
 
-    merge_lora.py
-      Merge a trained LoRA adapter into the base model.
+  merge_lora.py
+    Merge a trained LoRA adapter into the base model.
 
 checkpoints/qwen3-8b-planner/
   README.md
@@ -106,7 +102,7 @@ To run the pipeline you need to prepare the following:
 | FAISS index                 | Wikipedia retrieval index used by `retriever_server.py`                      |
 | Wikipedia corpus            | FlashRAG `wiki18_100w` corpus                                                |
 
-Search caches (`Pipeline/scripts/cache/`, `retriever_cache/`) and run outputs (`outputs/`) are not something you prepare — they're generated automatically as the pipeline runs.
+Search caches (`scripts/cache/`, `scripts/retriever_cache/`) and run outputs (`scripts/outputs/`) are not something you prepare — they're generated automatically as the pipeline runs.
 
 For raw dataset formats, see:
 
@@ -121,7 +117,7 @@ The retriever uses the [FlashRAG](https://github.com/RUC-NLPIR/FlashRAG) `wiki18
 
 ## Pipeline
 
-Commands below that aren't under `Planner/` are run from `Pipeline/scripts/`.
+Commands below that aren't under `Planner/` are run from `scripts/`.
 
 ### 1. Generate Planner Training Data
 
@@ -211,7 +207,7 @@ python run_search_o1_wiki.py --preset r1_llama8b \
   --retriever_gpus <retriever_gpu_ids>
 ```
 
-Available presets: `r1_llama8b`, `r1_qwen14b`. The QwQ-32B Search-o1 preset lives separately at `rerun/run_search_o1_wiki_qwq32b.py`.
+Available presets: `r1_llama8b`, `r1_qwen14b`.
 
 ---
 
