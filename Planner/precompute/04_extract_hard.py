@@ -1,11 +1,11 @@
 """
-Step 4: judge_pass=False인 항목만 hard_selected로 추출
+Step 4: Extract only judge_pass=False items into hard_selected
 
-- judge_pass=True  → Qwen이 올바른 plan 생성 → 제거 (쉬운 문제)
-- judge_pass=False → plan 실패 → hard_selected에 포함
+- judge_pass=True  → Qwen produced a correct plan → dropped (easy question)
+- judge_pass=False → plan failed → included in hard_selected
 
-출력: data/hard_selected/{dataset}_hard_selected.jsonl
-사용법: python 04_extract_hard.py [nq|hotpotqa ...]  (기본값: 전체)
+Output: data/hard_selected/{dataset}_hard_selected.jsonl
+Usage: python 04_extract_hard.py [nq|hotpotqa ...]  (default: all)
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 OUT_DIR = DATA_DIR / "hard_selected"
 
-# judge 결과에서 제거할 메타 필드
+# Meta fields to strip from the judge results
 DROP_FIELDS = {"predicted_steps", "judge_pass", "judge_reason"}
 
 
@@ -52,10 +52,10 @@ def run(dataset: str):
                 f_out.write(json.dumps(clean, ensure_ascii=False) + "\n")
 
     print(f"[{dataset}] Total judged:  {total}")
-    print(f"  PASS (easy): {easy} ({100*easy/max(total,1):.1f}%) → 제외")
+    print(f"  PASS (easy): {easy} ({100*easy/max(total,1):.1f}%) → excluded")
     print(f"  FAIL (hard): {hard} ({100*hard/max(total,1):.1f}%) → hard_selected")
     if no_verdict:
-        print(f"  No verdict:  {no_verdict} → 제외")
+        print(f"  No verdict:  {no_verdict} → excluded")
     print(f"\nSaved {hard} hard_selected items → {out_path}")
 
 

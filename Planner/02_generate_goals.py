@@ -12,16 +12,16 @@ from openai import OpenAI
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-MAX_CONTEXT_CHARS = 12_000  # A4 약 3장 분량 (비용 절감)
+MAX_CONTEXT_CHARS = 12_000  # roughly 3 pages of A4 (cost control)
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
 def _truncate_context(ctx_text: str, answer: str) -> str:
-    """context가 너무 길면 answer가 포함된 supporting sentence 중심으로 잘라낸다."""
+    """If context is too long, truncate around the supporting sentence containing the answer."""
     sents = _SENT_SPLIT.split(ctx_text)
 
     if len(sents) >= 2:
-        # supporting sentence 찾기
+        # Find the supporting sentence
         sup_idx = None
         for i, s in enumerate(sents):
             if answer in s:
@@ -45,7 +45,7 @@ def _truncate_context(ctx_text: str, answer: str) -> str:
         parts = [p for p in (before, sup_sent, after) if p]
         return " ".join(parts)
 
-    # 문장 1개 (테이블 등): 단어 단위로 answer 중심 앞뒤 균등 자르기
+    # Single sentence (e.g. a table): trim word-by-word, evenly around the answer
     words = ctx_text.split()
     ans_idx = None
     for i, w in enumerate(words):
@@ -466,11 +466,11 @@ def parse_results(results: list[dict], items_by_id: dict) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  LLM-as-Judge: goals 판정
+#  LLM-as-Judge: judging goals
 # ═══════════════════════════════════════════════════════════════
 
 def normalize_goals(items: list[dict]) -> list[dict]:
-    """goals 의 plan/steps 를 predicted_steps 로 정규화."""
+    """Normalize goals' plan/steps into predicted_steps."""
     normalized = []
     for item in items:
         item = dict(item)
@@ -494,7 +494,7 @@ def judge_goals(
     shard_id: int | None = None,
     num_shards: int | None = None,
 ):
-    """goals 파일을 LLM-as-Judge 로 판정하여 judged 파일에 저장."""
+    """Judge a goals file with LLM-as-Judge and save to a judged file."""
     import sys as _sys
     from importlib import import_module as _import
     _sys.path.insert(0, str(Path(__file__).parent))
@@ -510,7 +510,7 @@ def judge_goals(
         judged_path = GOALS_DIR / f"{dataset}_goals_judged{suffix}.jsonl"
 
     if not goals_path.exists():
-        print(f"[{dataset}] goals 파일 없음: {goals_path}")
+        print(f"[{dataset}] goals file not found: {goals_path}")
         return []
 
     items = []
@@ -519,14 +519,14 @@ def judge_goals(
             items.append(json.loads(line))
     items = normalize_goals(items)
 
-    # 샤딩: 전체 아이템 중 해당 샤드만 선택
+    # Sharding: select only this shard's items from the full set
     if is_shard:
         items = [item for i, item in enumerate(items) if i % num_shards == shard_id]
-        print(f"[{dataset}] shard {shard_id}/{num_shards}: {len(items)}개")
+        print(f"[{dataset}] shard {shard_id}/{num_shards}: {len(items)}")
     else:
-        print(f"[{dataset}] goals 로드: {len(items)}개")
+        print(f"[{dataset}] loaded goals: {len(items)}")
 
-    # 이미 판정된 ID 확인 → 이어쓰기
+    # Check for already-judged IDs → resume
     done: dict[str, dict] = {}
     if judged_path.exists():
         with open(judged_path, encoding="utf-8") as f:
@@ -537,11 +537,11 @@ def judge_goals(
                 except (json.JSONDecodeError, KeyError):
                     pass
         if done:
-            print(f"[{dataset}] 기존 {len(done)}개 판정 완료, 나머지 이어쓰기")
+            print(f"[{dataset}] {len(done)} already judged, resuming the rest")
 
     remaining = [item for item in items if item["id"] not in done]
     if not remaining:
-        print(f"[{dataset}] 모든 항목 판정 완료")
+        print(f"[{dataset}] All items already judged")
     else:
         cfg = eval_mod.DATASET_CONFIGS[dataset]
         model_name = cfg["model_name"]
@@ -558,7 +558,7 @@ def judge_goals(
             from concurrent.futures import ThreadPoolExecutor, as_completed
             from tqdm import tqdm
 
-            print(f"[{dataset}] 판정 대상: {len(remaining)}개 (model: {model_name}, workers: {num_workers})")
+            print(f"[{dataset}] Judging: {len(remaining)} items (model: {model_name}, workers: {num_workers})")
 
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 futures = {
@@ -583,12 +583,12 @@ def judge_goals(
 
     n_pass = sum(1 for r in all_judged if r.get("pass"))
     n_fail = len(all_judged) - n_pass
-    print(f"[{dataset}] 판정 완료: PASS {n_pass} / FAIL {n_fail} (총 {len(all_judged)}개)")
+    print(f"[{dataset}] Judging complete: PASS {n_pass} / FAIL {n_fail} (total {len(all_judged)})")
     return all_judged
 
 
 def merge_and_filter(dataset: str, num_shards: int):
-    """샤드별 judged 파일을 병합하고 filtered 파일을 생성한다."""
+    """Merge per-shard judged files and produce the filtered file."""
     all_judged: dict[str, dict] = {}
     for s in range(num_shards):
         shard_path = GOALS_DIR / f"{dataset}_goals_judged_s{s}.jsonl"
@@ -606,7 +606,7 @@ def merge_and_filter(dataset: str, num_shards: int):
 
     n_pass = sum(1 for r in all_judged.values() if r.get("pass"))
     n_total = len(all_judged)
-    print(f"[{dataset}] 병합 완료: PASS {n_pass} / FAIL {n_total - n_pass} (총 {n_total}개)")
+    print(f"[{dataset}] Merge complete: PASS {n_pass} / FAIL {n_total - n_pass} (total {n_total})")
 
     write_filtered(dataset, list(all_judged.values()))
 
@@ -616,7 +616,7 @@ def merge_and_filter(dataset: str, num_shards: int):
 
 
 def write_filtered(dataset: str, all_judged: list[dict]):
-    """PASS 판정된 goals 만 filtered 파일로 저장."""
+    """Save only PASS-judged goals to the filtered file."""
     goals_path = GOALS_DIR / f"{dataset}_goals.jsonl"
     filtered_path = GOALS_DIR / f"{dataset}_goals_filtered.jsonl"
 
@@ -632,11 +632,11 @@ def write_filtered(dataset: str, all_judged: list[dict]):
         for item in filtered:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-    print(f"  필터링 결과 → {filtered_path} ({len(filtered)}개)")
+    print(f"  Filtered result → {filtered_path} ({len(filtered)} items)")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  메인: generate → judge → filtered
+#  main: generate → judge → filtered
 # ═══════════════════════════════════════════════════════════════
 
 def run(dataset: str, limit: int | None = None,
@@ -664,23 +664,23 @@ def run(dataset: str, limit: int | None = None,
     exclude_ids = FEWSHOT_EXCLUDE_IDS.get(dataset, set())
     items = [item for item in items if item["id"] not in exclude_ids]
 
-    # 기존 goals 파일이 있으면 이미 생성된 ID 제외 (중복 생성 방지)
+    # If a goals file already exists, exclude already-generated IDs (avoid duplicates)
     out_path = GOALS_DIR / f"{dataset}_goals.jsonl"
     existing_ids: set[str] = set()
     if out_path.exists():
         with open(out_path, encoding="utf-8") as f:
             for line in f:
                 existing_ids.add(json.loads(line)["id"])
-        print(f"기존 goals: {len(existing_ids)}개 (중복 제외)")
+        print(f"Existing goals: {len(existing_ids)} (excluded as duplicates)")
 
     items = [item for item in items if item["id"] not in existing_ids]
 
     if limit is not None:
         items = items[:limit]
-        print(f"limit={limit} 적용 → {len(items)}개 생성 예정")
+        print(f"limit={limit} applied → generating {len(items)}")
 
     if not items:
-        print(f"{dataset}: 생성할 항목 없음 (이미 충분)")
+        print(f"{dataset}: nothing to generate (already sufficient)")
     else:
         items_by_id = {item["id"]: item for item in items}
 
@@ -691,14 +691,14 @@ def run(dataset: str, limit: int | None = None,
         GOALS_DIR.mkdir(parents=True, exist_ok=True)
         parsed = parse_results(results, items_by_id)
 
-        # 파일 쓰기 직전에 기존 ID를 다시 읽어서 중복 방지 (동시 실행 등 대비)
+        # Re-read existing IDs right before writing to avoid duplicates (e.g. concurrent runs)
         if out_path.exists():
             existing_ids.clear()
             with open(out_path, encoding="utf-8") as f:
                 for line in f:
                     existing_ids.add(json.loads(line)["id"])
 
-        # parsed 내부 중복 제거 + 기존 ID 제외
+        # Dedupe within parsed + exclude existing IDs
         seen: set[str] = set(existing_ids)
         deduped: list[dict] = []
         for item in parsed:
@@ -707,18 +707,18 @@ def run(dataset: str, limit: int | None = None,
                 deduped.append(item)
 
         if not deduped:
-            print(f"\n{dataset}: 새로 추가할 항목 없음 (모두 중복)")
+            print(f"\n{dataset}: nothing new to add (all duplicates)")
         else:
             with open(out_path, "a", encoding="utf-8") as f:
                 for item in deduped:
                     f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
             total = len(existing_ids) + len(deduped)
-            print(f"\n{dataset}: +{len(deduped)} 추가 (총 {total}개) → {out_path}")
+            print(f"\n{dataset}: +{len(deduped)} added (total {total}) → {out_path}")
 
     # LLM-as-Judge
     if skip_judge:
-        print(f"\n[{dataset}] judge 건너뛰기 (--skip-judge)")
+        print(f"\n[{dataset}] skipping judge (--skip-judge)")
         return
 
     print(f"\n=== [{dataset}] LLM-as-Judge ===")
@@ -731,15 +731,15 @@ if __name__ == "__main__":
     import argparse as _ap
 
     parser = _ap.ArgumentParser(
-        description="Goals 생성 (Batch API) + LLM-as-Judge 판정")
+        description="Generate goals (Batch API) + judge with LLM-as-Judge")
     parser.add_argument("dataset", nargs="?", default="nq", choices=["nq", "hotpotqa"])
-    parser.add_argument("--limit", type=int, default=None, help="생성할 최대 개수 (기존 제외 후 적용)")
-    parser.add_argument("--gpu", type=str, default=None, help="사용할 GPU ID")
-    parser.add_argument("--port", type=int, default=None, help="vLLM 포트")
-    parser.add_argument("--skip-judge", action="store_true", help="LLM judge 건너뛰기")
-    parser.add_argument("--judge-only", action="store_true", help="생성 건너뛰고 judge 만 실행")
-    parser.add_argument("--shard-id", type=int, default=None, help="샤드 ID (0-based)")
-    parser.add_argument("--num-shards", type=int, default=None, help="전체 샤드 수")
+    parser.add_argument("--limit", type=int, default=None, help="Max number to generate (applied after excluding existing)")
+    parser.add_argument("--gpu", type=str, default=None, help="GPU ID to use")
+    parser.add_argument("--port", type=int, default=None, help="vLLM port")
+    parser.add_argument("--skip-judge", action="store_true", help="Skip the LLM judge")
+    parser.add_argument("--judge-only", action="store_true", help="Skip generation and run judge only")
+    parser.add_argument("--shard-id", type=int, default=None, help="Shard ID (0-based)")
+    parser.add_argument("--num-shards", type=int, default=None, help="Total number of shards")
     args = parser.parse_args()
 
     if args.judge_only:

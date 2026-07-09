@@ -87,8 +87,8 @@ def format_messages(tokenizer, example: dict) -> str:
 
 
 def get_free_gpus(min_free_mib: int = 10000) -> list[int]:
-    """여유 메모리가 min_free_mib 이상인 GPU index 목록 반환.
-    CUDA가 초기화되기 전에 호출해야 합니다."""
+    """Return indices of GPUs with at least min_free_mib free memory.
+    Must be called before CUDA is initialized."""
     import subprocess
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
@@ -103,15 +103,15 @@ def get_free_gpus(min_free_mib: int = 10000) -> list[int]:
 
 
 def main():
-    # 외부에서 CUDA_VISIBLE_DEVICES가 설정되지 않은 경우에만 자동 감지
+    # Auto-detect only if CUDA_VISIBLE_DEVICES wasn't set externally
     if "CUDA_VISIBLE_DEVICES" not in os.environ:
         free_gpus = get_free_gpus()
         if not free_gpus:
-            raise RuntimeError("사용 가능한 GPU가 없습니다.")
+            raise RuntimeError("No available GPUs.")
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, free_gpus))
-        print(f"사용 GPU (자동 감지): {free_gpus}")
+        print(f"Using GPUs (auto-detected): {free_gpus}")
     else:
-        print(f"사용 GPU: {os.environ['CUDA_VISIBLE_DEVICES']}")
+        print(f"Using GPUs: {os.environ['CUDA_VISIBLE_DEVICES']}")
 
     # 1. Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
@@ -159,7 +159,7 @@ def main():
     train_ds = Dataset.from_list(train_raw).map(preprocess, batched=True, remove_columns=["messages", "id", "dataset"])
     val_ds = Dataset.from_list(val_raw).map(preprocess, batched=True, remove_columns=["messages", "id", "dataset"])
 
-    # assistant 응답에만 loss 계산
+    # Compute loss only on assistant responses
     response_template = "<|im_start|>assistant\n"
     collator = DataCollatorForCompletionOnlyLM(
         response_template=response_template,
@@ -186,7 +186,7 @@ def main():
         save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        report_to="none",  # wandb 쓰려면 "wandb"로 변경
+        report_to="none",  # switch to "wandb" to enable W&B logging
         dataloader_num_workers=8,
         dataset_text_field="text",
         max_length=512,

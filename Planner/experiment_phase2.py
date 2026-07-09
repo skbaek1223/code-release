@@ -1,19 +1,19 @@
 """
-Phase 2: 크기 탐색
+Phase 2: size sweep
 
-Phase 1 최적 비율을 아래 RATIO 에 설정한 뒤 실행합니다.
+Set the Phase 1 optimal ratio in RATIO below, then run.
 
 Usage:
-    python experiment_phase2.py              # 1단계부터 전체 실행
+    python experiment_phase2.py              # run everything from step 1
     HF_HUB_OFFLINE=1 python experiment_phase2.py --start 4
-    # 3단계(sample+train)부터 시작
-    python experiment_phase2.py --train-only  # train만 실행, 모델 저장 후 종료
+    # start from step 3 (sample+train)
+    python experiment_phase2.py --train-only  # train only, save model, then exit
 
-단계:
-    1) generate        — 최대 크기에 맞게 goals 를 한 번에 생성
-    2) convert+sample  — goals → SFT 변환 후, 크기별 train 데이터 샘플링
-    3) train           — 크기별 GPU 1개씩 할당, 병렬 학습
-    4) infer+eval      — 통합 worker 가 infer 우선 처리, 배정 완료 시 eval 병행
+Steps:
+    1) generate        — generate goals once, sized for the largest experiment
+    2) convert+sample  — convert goals → SFT, then sample per-size train data
+    3) train           — allocate one GPU per size, train in parallel
+    4) infer+eval      — unified worker handles infer first, runs eval as slots free up
 """
 import json
 import math
@@ -38,7 +38,7 @@ EXP_DIR = ROOT / "data" / "experiments"
 TRAIN_JSONL = SFT_DIR / "train.jsonl"
 VAL_RATIO = 0.05
 
-# Phase 1 최적 비율 (합=1000 기준) — Phase 1 결과에 따라 수정
+# Phase 1 optimal ratio (sums to 1000) — adjust based on Phase 1 results
 RATIO = {"nq": 300, "hotpotqa": 700}
 
 SIZES = [9000, 10000]
@@ -48,19 +48,19 @@ SEED = 42
 ALLOWED_GPUS = [1, 3, 5, 7]
 N_TRAIN_GPUS = 3
 N_INFER_GPUS = 4
-N_INFER_SPLITS = 2  # 각 (tag, ds) infer 를 몇 개 GPU 로 분할
-N_EVAL_SPLITS = 2   # 각 (tag, ds) eval 을 몇 개 GPU 로 분할
+N_INFER_SPLITS = 2  # how many GPUs to split each (tag, ds) infer job across
+N_EVAL_SPLITS = 2   # how many GPUs to split each (tag, ds) eval job across
 
 
-# ── GPU 감지 ────────────────────────────────────────────────────
+# ── GPU detection ────────────────────────────────────────────────────
 
 def detect_free_gpus(n: int, min_free_mib: int = 10_000,
                      strict: bool = False) -> list[int]:
-    """여유 GPU 를 최대 n 개 찾아 반환한다.
+    """Find and return up to n free GPUs.
 
-    ALLOWED_GPUS 에 포함된 GPU 만 후보로 사용한다.
-    strict=True 이면 n 개 미만일 때 RuntimeError,
-    strict=False 이면 가용한 만큼만 반환 (최소 1개 필요).
+    Only GPUs in ALLOWED_GPUS are considered candidates.
+    strict=True raises RuntimeError if fewer than n are found;
+    strict=False returns as many as are available (at least 1 required).
     """
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=index,memory.free",
@@ -80,11 +80,11 @@ def detect_free_gpus(n: int, min_free_mib: int = 10_000,
     if len(gpus) < n:
         if strict:
             raise RuntimeError(
-                f"여유 GPU {n}장 필요, {len(gpus)}장만 감지됨 (기준: {min_free_mib} MiB)")
+                f"Needed {n} free GPUs, only found {len(gpus)} (threshold: {min_free_mib} MiB)")
         if len(gpus) == 0:
             raise RuntimeError(
-                f"여유 GPU 0장 — 최소 1장 필요 (기준: {min_free_mib} MiB)")
-        print(f"⚠ GPU {n}장 요청했으나 {len(gpus)}장만 가용, {len(gpus)}장으로 진행")
+                f"0 free GPUs — at least 1 required (threshold: {min_free_mib} MiB)")
+        print(f"⚠ Requested {n} GPUs but only {len(gpus)} available, proceeding with {len(gpus)}")
     return gpus
 
 
@@ -104,8 +104,8 @@ def count_goals(dataset: str) -> int:
 
 
 def step_generate(counts: dict[str, int]) -> bool:
-    """goals 확인 및 생성. 새로 생성했으면 True 반환."""
-    print("\n=== [generate] goals 확인 및 생성 ===")
+    """Check and generate goals. Returns True if any were newly generated."""
+    print("\n=== [generate] checking and generating goals ===")
     need_rebuild = False
     for ds, n_train in counts.items():
         if n_train == 0:
@@ -114,7 +114,7 @@ def step_generate(counts: dict[str, int]) -> bool:
         n_goals_exist = count_goals(ds)
         deficit = n_goals_needed - n_goals_exist
         if deficit > 0:
-            print(f"  {ds}: goals {n_goals_exist}개 → {n_goals_needed}개 필요, +{deficit}개 생성")
+            print(f"  {ds}: have {n_goals_exist} goals → need {n_goals_needed}, generating +{deficit}")
             cmd = [
                 sys.executable, str(PIPELINE_DIR / "02_generate_goals.py"),
                 ds, "--limit", str(deficit), "--skip-judge",
@@ -122,13 +122,13 @@ def step_generate(counts: dict[str, int]) -> bool:
             subprocess.run(cmd, check=True)
             need_rebuild = True
         else:
-            print(f"  {ds}: goals {n_goals_exist}개 ≥ {n_goals_needed}개 필요, 충분")
+            print(f"  {ds}: have {n_goals_exist} goals ≥ {n_goals_needed} needed, sufficient")
     return need_rebuild
 
 
 def step_convert():
-    """raw goals → SFT train/val JSONL 변환."""
-    print("\n=== [convert] raw goals → SFT 변환 ===")
+    """Convert raw goals → SFT train/val JSONL."""
+    print("\n=== [convert] raw goals → SFT conversion ===")
     sys.path.insert(0, str(PIPELINE_DIR))
     sft_mod = import_module("04_sft_data_and_train")
 
@@ -141,17 +141,17 @@ def step_convert():
         if p.stem.replace("_goals", "") in TRAIN_DATASETS
     )
     if not goal_files:
-        raise FileNotFoundError(f"goals 파일 없음: {GOALS_DIR}")
+        raise FileNotFoundError(f"No goals files found: {GOALS_DIR}")
 
     all_items: list[dict] = []
     for path in goal_files:
         items = [json.loads(line) for line in open(path)]
         dataset_name = path.stem.replace("_goals", "")
-        print(f"  {dataset_name}: {len(items)}개 로드 (raw)")
+        print(f"  {dataset_name}: loaded {len(items)} (raw)")
         all_items.extend(items)
 
     rng.shuffle(all_items)
-    print(f"  전체: {len(all_items)}개")
+    print(f"  total: {len(all_items)}")
 
     val_count = max(1, int(len(all_items) * VAL_RATIO))
     val = all_items[:val_count]
@@ -161,13 +161,13 @@ def step_convert():
     with open(val_path, "w") as f:
         for item in val:
             f.write(json.dumps(sft_mod.item_to_sft(item), ensure_ascii=False) + "\n")
-    print(f"  val 저장: {len(val)}개 → {val_path}")
+    print(f"  saved val: {len(val)} → {val_path}")
 
     train_path = SFT_DIR / "train.jsonl"
     with open(train_path, "w") as f:
         for item in train:
             f.write(json.dumps(sft_mod.item_to_sft(item), ensure_ascii=False) + "\n")
-    print(f"  train 저장: {len(train)}개 → {train_path}")
+    print(f"  saved train: {len(train)} → {train_path}")
 
 
 def load_train_by_dataset(path: Path) -> dict[str, list[dict]]:
@@ -184,7 +184,7 @@ def step_sample(tag: str, counts: dict[str, int], seed: int):
     train_path = exp_dir / "train.jsonl"
     config_path = exp_dir / "config.json"
 
-    print(f"[{tag}] sample 시작")
+    print(f"[{tag}] starting sample")
     by_dataset = load_train_by_dataset(TRAIN_JSONL)
 
     rng = random.Random(seed)
@@ -194,11 +194,11 @@ def step_sample(tag: str, counts: dict[str, int], seed: int):
             continue
         pool = by_dataset.get(ds, [])
         if len(pool) < n:
-            print(f"  [{tag}] WARNING: {ds} 요청 {n}개 > 가용 {len(pool)}개, 전부 사용")
+            print(f"  [{tag}] WARNING: {ds} requested {n} > available {len(pool)}, using all")
             n = len(pool)
         sampled = rng.sample(pool, n)
         subset.extend(sampled)
-        print(f"  [{tag}] {ds}: {n}개 샘플링")
+        print(f"  [{tag}] {ds}: sampled {n}")
     rng.shuffle(subset)
 
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -211,18 +211,18 @@ def step_sample(tag: str, counts: dict[str, int], seed: int):
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
-    print(f"[{tag}] sample 완료: {len(subset)}개 → {train_path}")
+    print(f"[{tag}] sample complete: {len(subset)} → {train_path}")
 
 
-# ── infer 분할/병합 ──────────────────────────────────────────
+# ── infer split/merge ──────────────────────────────────────────
 
 def _prepare_split_infer(tag: str, ds: str, model_dir: Path,
                          n_splits: int = N_INFER_SPLITS,
                          ) -> list[tuple]:
-    """남은 추론 대상을 n_splits 개로 분할, ID 파일 생성.
+    """Split the remaining inference targets into n_splits, writing an ID file for each.
 
-    반환: [(tag, ds, model_dir, part_pred, id_file, part_idx), ...]
-    이미 완료된 경우 빈 리스트 반환.
+    Returns: [(tag, ds, model_dir, part_pred, id_file, part_idx), ...]
+    Returns an empty list if already complete.
     """
     val_path = ROOT / "data" / "val" / f"{ds}_val.jsonl"
     pred_path = EXP_DIR / tag / f"predictions_{ds}.jsonl"
@@ -260,12 +260,12 @@ def _prepare_split_infer(tag: str, ds: str, model_dir: Path,
             part_pred.unlink()
         tasks.append((tag, ds, model_dir, part_pred, id_file, i))
 
-    print(f"[{tag}] infer {ds}: 남은 {len(remaining)}개 → {len(tasks)}개 분할")
+    print(f"[{tag}] infer {ds}: {len(remaining)} remaining → split into {len(tasks)}")
     return tasks
 
 
 def _merge_part_predictions(tag: str, ds: str):
-    """part 파일들을 메인 predictions 파일에 append 후 정리."""
+    """Append part files into the main predictions file, then clean up."""
     exp_dir = EXP_DIR / tag
     pred_path = exp_dir / f"predictions_{ds}.jsonl"
     parts = sorted(exp_dir.glob(f"predictions_{ds}_part*.jsonl"))
@@ -279,7 +279,7 @@ def _merge_part_predictions(tag: str, ds: str):
             part.unlink()
     for id_file in exp_dir.glob(f"_ids_{ds}_part*.txt"):
         id_file.unlink()
-    print(f"[{tag}] infer {ds}: {len(parts)}개 part 병합 완료")
+    print(f"[{tag}] infer {ds}: merged {len(parts)} parts")
 
 
 def _enqueue_infer_splits(tag: str, ds: str, model_dir: Path,
@@ -289,10 +289,10 @@ def _enqueue_infer_splits(tag: str, ds: str, model_dir: Path,
                           infer_parts_lock: threading.Lock,
                           eval_parts_remaining: dict,
                           eval_parts_lock: threading.Lock):
-    """infer 분할 태스크를 큐에 넣거나, 이미 완료면 eval 큐에 넣는다."""
+    """Push infer split tasks onto the queue, or push straight to eval if already done."""
     sub_tasks = _prepare_split_infer(tag, ds, model_dir)
     if not sub_tasks:
-        print(f"[{tag}] infer {ds} 이미 완료, 건너뛰기")
+        print(f"[{tag}] infer {ds} already complete, skipping")
         _enqueue_eval_splits(tag, ds, eval_queue,
                              eval_parts_remaining, eval_parts_lock)
         return
@@ -307,16 +307,16 @@ def _enqueue_infer_splits(tag: str, ds: str, model_dir: Path,
 def _prepare_split_eval(tag: str, ds: str,
                         n_splits: int = N_EVAL_SPLITS,
                         ) -> list[tuple]:
-    """남은 평가 대상을 n_splits 개로 분할, part prediction 파일 생성.
+    """Split the remaining eval targets into n_splits, writing a part prediction file for each.
 
-    반환: [(tag, ds, part_pred, part_judge, part_idx), ...]
-    이미 완료된 경우 빈 리스트 반환.
+    Returns: [(tag, ds, part_pred, part_judge, part_idx), ...]
+    Returns an empty list if already complete.
     """
     exp_dir = EXP_DIR / tag
     pred_path = exp_dir / f"predictions_{ds}.jsonl"
     judge_path = exp_dir / f"judge_{ds}.jsonl"
 
-    # 전체 prediction ID 수집
+    # Collect all prediction IDs
     all_ids = []
     with open(pred_path) as f:
         for line in f:
@@ -325,7 +325,7 @@ def _prepare_split_eval(tag: str, ds: str,
             except (json.JSONDecodeError, KeyError):
                 pass
 
-    # 이미 judge 완료된 ID 제외
+    # Exclude IDs already judged
     done_ids: set[str] = set()
     if judge_path.exists():
         with open(judge_path) as f:
@@ -339,7 +339,7 @@ def _prepare_split_eval(tag: str, ds: str,
     if not remaining:
         return []
 
-    # remaining ID 에 해당하는 prediction 행을 읽어둠
+    # Read the prediction rows corresponding to the remaining IDs
     pred_by_id: dict[str, str] = {}
     with open(pred_path) as f:
         for line in f:
@@ -366,12 +366,12 @@ def _prepare_split_eval(tag: str, ds: str,
             part_judge.unlink()
         tasks.append((tag, ds, part_pred, part_judge, i))
 
-    print(f"[{tag}] eval {ds}: 남은 {len(remaining)}개 → {len(tasks)}개 분할")
+    print(f"[{tag}] eval {ds}: {len(remaining)} remaining → split into {len(tasks)}")
     return tasks
 
 
 def _merge_part_judges(tag: str, ds: str):
-    """part judge 파일들을 메인 judge 파일에 append 후 정리."""
+    """Append part judge files into the main judge file, then clean up."""
     exp_dir = EXP_DIR / tag
     judge_path = exp_dir / f"judge_{ds}.jsonl"
     parts = sorted(exp_dir.glob(f"judge_{ds}_part*.jsonl"))
@@ -383,20 +383,20 @@ def _merge_part_judges(tag: str, ds: str):
                 for line in f_in:
                     f_out.write(line)
             part.unlink()
-    # part prediction 파일도 정리
+    # Also clean up part prediction files
     for pp in exp_dir.glob(f"predictions_{ds}_eval_part*.jsonl"):
         pp.unlink()
-    print(f"[{tag}] eval {ds}: {len(parts)}개 part 병합 완료")
+    print(f"[{tag}] eval {ds}: merged {len(parts)} parts")
 
 
 def _enqueue_eval_splits(tag: str, ds: str,
                          eval_queue: queue.Queue,
                          eval_parts_remaining: dict,
                          eval_parts_lock: threading.Lock):
-    """eval 분할 태스크를 큐에 넣거나, 이미 완료면 완료 처리."""
+    """Push eval split tasks onto the queue, or mark as done if already complete."""
     sub_tasks = _prepare_split_eval(tag, ds)
     if not sub_tasks:
-        print(f"[{tag}] eval {ds} 이미 완료, 건너뛰기")
+        print(f"[{tag}] eval {ds} already complete, skipping")
         eval_queue.put(("__done__", tag, ds))
         return
     with eval_parts_lock:
@@ -408,11 +408,11 @@ def _enqueue_eval_splits(tag: str, ds: str,
 # ── train ─────────────────────────────────────────────────────
 
 def run_train_on_gpu(tag: str, counts: dict[str, int], gpu_id: int):
-    """train 을 지정 GPU 에서 실행."""
+    """Run train on the given GPU."""
     exp_dir = EXP_DIR / tag
     final_dir = exp_dir / "checkpoints" / "final"
     if final_dir.exists():
-        print(f"[{tag}] train 이미 완료 ({final_dir}), 건너뛰기")
+        print(f"[{tag}] train already complete ({final_dir}), skipping")
         return
 
     env = os.environ.copy()
@@ -420,24 +420,24 @@ def run_train_on_gpu(tag: str, counts: dict[str, int], gpu_id: int):
 
     total = sum(counts.values())
     print(f"\n{'='*60}")
-    print(f"[{tag}] GPU {gpu_id} | {counts} (총 {total})")
+    print(f"[{tag}] GPU {gpu_id} | {counts} (total {total})")
     print(f"{'='*60}")
 
-    print(f"[{tag}] train 시작 (GPU {gpu_id})")
+    print(f"[{tag}] starting train (GPU {gpu_id})")
     subprocess.run([
         sys.executable, str(PIPELINE_DIR / "04_sft_data_and_train.py"), "train",
         "--train-data", str(exp_dir / "train.jsonl"),
         "--output-dir", str(exp_dir / "checkpoints"),
     ], env=env, check=True)
-    print(f"[{tag}] train 완료")
+    print(f"[{tag}] train complete")
 
-    # train 완료 후 기존 infer/eval 결과 삭제 (재실행 강제)
+    # After train completes, remove stale infer/eval results to force a rerun
     for ds in EVAL_DATASETS:
         for pattern in [f"predictions_{ds}.jsonl", f"judge_{ds}.jsonl"]:
             old = exp_dir / pattern
             if old.exists():
                 old.unlink()
-                print(f"[{tag}] 기존 {pattern} 삭제 (재실행 예정)")
+                print(f"[{tag}] removed stale {pattern} (will rerun)")
 
 
 # ── eval helper ───────────────────────────────────────────────
@@ -445,7 +445,7 @@ def run_train_on_gpu(tag: str, counts: dict[str, int], gpu_id: int):
 def _do_one_eval(eval_mod, tag: str, ds: str, client, model_name: str,
                  gpu_id: int, pred_path: Path = None, judge_path: Path = None,
                  part_idx: int = None):
-    """단일 eval 태스크 (전체 또는 part) 평가."""
+    """Evaluate a single eval task (full or part)."""
     exp_dir = EXP_DIR / tag
     if pred_path is None:
         pred_path = exp_dir / f"predictions_{ds}.jsonl"
@@ -454,20 +454,20 @@ def _do_one_eval(eval_mod, tag: str, ds: str, client, model_name: str,
 
     label = f"{tag}/{ds}" if part_idx is None else f"{tag}/{ds} part{part_idx}"
 
-    # 이미 완료된 eval 건너뛰기
+    # Skip eval that's already complete
     if judge_path.exists() and _count_lines(judge_path) >= _count_lines(pred_path):
-        print(f"[GPU {gpu_id}] eval {label} 이미 완료, 건너뛰기")
+        print(f"[GPU {gpu_id}] eval {label} already complete, skipping")
         return
     if judge_path.exists():
         judge_path.unlink()
-    print(f"[GPU {gpu_id}] eval {label} 시작")
+    print(f"[GPU {gpu_id}] starting eval {label}")
     eval_mod._evaluate_dataset(
         pred_path, judge_path, ds, client, model_name, eval_mod.NUM_WORKERS,
     )
-    print(f"[GPU {gpu_id}] eval {label} 완료")
+    print(f"[GPU {gpu_id}] eval {label} complete")
 
 
-# ── 통합 worker (infer 우선 + eval 병행) ──────────────────────
+# ── unified worker (infer first + eval concurrently) ──────────────────────
 
 def _start_workers(
     gpu_pool: queue.Queue,
@@ -481,11 +481,11 @@ def _start_workers(
     eval_parts_remaining: dict,
     eval_parts_lock: threading.Lock,
 ) -> list[threading.Thread]:
-    """infer/eval 통합 worker.
+    """Unified infer/eval worker.
 
-    infer_queue 에 분할된 infer 서브태스크가 있으면 우선 처리하고,
-    모두 배정되었으면 eval_queue 에서 eval 분할 태스크를 처리한다.
-    모든 infer 완료를 기다리지 않고 eval 을 병행한다.
+    Processes split infer subtasks from infer_queue first when present; once all
+    have been assigned, processes eval split tasks from eval_queue. Eval runs
+    concurrently rather than waiting for all infer to finish.
     """
     from openai import OpenAI
     sys.path.insert(0, str(PIPELINE_DIR))
@@ -499,7 +499,7 @@ def _start_workers(
         port = 8010 + worker_id
 
         while not all_eval_done.is_set():
-            # ── 1) infer 우선 처리 (분할 서브태스크) ────────────
+            # ── 1) infer takes priority (split subtasks) ────────────
             infer_task = None
             try:
                 infer_task = infer_queue.get_nowait()
@@ -519,12 +519,12 @@ def _start_workers(
                         "--dataset", ds,
                         "--id-file", str(id_file),
                     ]
-                    print(f"[{tag}] infer {ds} part{part_idx} 시작 (GPU {gpu_id})")
+                    print(f"[{tag}] starting infer {ds} part{part_idx} (GPU {gpu_id})")
                     subprocess.run(cmd, env=env, check=True)
-                    print(f"[{tag}] infer {ds} part{part_idx} 완료 (GPU {gpu_id})")
+                    print(f"[{tag}] infer {ds} part{part_idx} complete (GPU {gpu_id})")
                 finally:
                     gpu_pool.put(gpu_id)
-                # 모든 part 완료 시 병합 → eval 분할 태스크 제출
+                # Once all parts are done, merge → submit eval split tasks
                 with infer_parts_lock:
                     infer_parts_remaining[(tag, ds)] -= 1
                     if infer_parts_remaining[(tag, ds)] == 0:
@@ -534,12 +534,12 @@ def _start_workers(
                                              eval_parts_lock)
                 continue
 
-            # ── 2) eval 처리 (분할 서브태스크, infer 우선권 유지) ──
+            # ── 2) eval processing (split subtasks, infer keeps priority) ──
             eval_task = None
             try:
                 eval_task = eval_queue.get_nowait()
             except queue.Empty:
-                # 양쪽 다 비어 있으면 종료 확인 또는 대기
+                # Both empty: check for completion, or wait
                 if all_submitted.is_set() and infer_queue.empty():
                     with counter_lock:
                         if eval_completed[0] >= n_total_eval:
@@ -548,7 +548,7 @@ def _start_workers(
                 time.sleep(1)
                 continue
 
-            # 이미 완료된 (tag, ds) 는 카운트만 올리고 넘어감
+            # For (tag, ds) already complete, just bump the counter and move on
             if eval_task[0] == "__done__":
                 _, tag, ds = eval_task
                 with counter_lock:
@@ -565,7 +565,7 @@ def _start_workers(
             client = None
             try:
                 while True:
-                    # eval 중에도 미배정 infer 가 있으면 양보
+                    # Yield to any unassigned infer task even mid-eval
                     if not infer_queue.empty():
                         eval_queue.put((tag, ds, part_pred, part_judge, part_idx))
                         break
@@ -589,7 +589,7 @@ def _start_workers(
                                  pred_path=part_pred, judge_path=part_judge,
                                  part_idx=part_idx)
 
-                    # part 완료 → 모든 part 완료 시 병합
+                    # Part done → merge once all parts are done
                     with eval_parts_lock:
                         eval_parts_remaining[(tag, ds)] -= 1
                         if eval_parts_remaining[(tag, ds)] == 0:
@@ -602,11 +602,11 @@ def _start_workers(
                     if all_eval_done.is_set():
                         break
 
-                    # 미배정 infer 가 있으면 vLLM 정리 후 양보
+                    # Yield and tear down vLLM if an unassigned infer task appears
                     if not infer_queue.empty():
                         break
 
-                    # 다음 eval 태스크 (non-blocking)
+                    # Next eval task (non-blocking)
                     try:
                         eval_task = eval_queue.get_nowait()
                     except queue.Empty:
@@ -642,13 +642,13 @@ def _start_workers(
 # ── main ────────────────────────────────────────────────────────
 
 def step_precompute_val():
-    """val 데이터를 precompute (이미 존재하면 건너뛰기)."""
-    print("\n=== [precompute] val 데이터 확인 ===")
+    """Precompute val data (skip if it already exists)."""
+    print("\n=== [precompute] checking val data ===")
     val_loader = import_module("01_val_loader")
     for ds in EVAL_DATASETS:
         val_path = val_loader.VAL_DIR / f"{ds}_val.jsonl"
         if val_path.exists() and val_path.stat().st_size > 0:
-            print(f"  {ds}: 이미 존재 ({val_path}), 건너뛰기")
+            print(f"  {ds}: already exists ({val_path}), skipping")
         else:
             val_loader.precompute(ds)
 
@@ -657,17 +657,17 @@ def main(start: int = 1, train_only: bool = False):
     n_exp = len(SIZES)
     ratio_total = sum(RATIO.values())
 
-    # 0. Val 데이터 precompute
+    # 0. Precompute val data
     step_precompute_val()
 
-    # 1. Generate: 최대 크기에 맞게 goals 생성
+    # 1. Generate: generate goals sized for the largest experiment
     if start <= 1:
         max_size = max(SIZES)
         max_counts = {ds: n * max_size // ratio_total for ds, n in RATIO.items()}
-        print(f"=== 최대 크기({max_size})에 맞게 goals 생성 ===")
+        print(f"=== generating goals sized for the largest experiment ({max_size}) ===")
         step_generate(max_counts)
 
-    # 2. Convert + Sample: goals → SFT 변환 후 크기별 샘플링
+    # 2. Convert + Sample: convert goals → SFT, then sample per size
     tags: list[str] = [f"S{size}" for size in SIZES]
     if start <= 2:
         step_convert()
@@ -680,7 +680,7 @@ def main(start: int = 1, train_only: bool = False):
     if train_only and start <= 3:
         train_gpus = detect_free_gpus(N_TRAIN_GPUS, strict=True)
         print(f"\n{'='*60}")
-        print(f"병렬 학습 (train only): {n_exp}개 크기 실험 (GPU: {train_gpus})")
+        print(f"Parallel training (train only): {n_exp} size experiments (GPUs: {train_gpus})")
         print(f"{'='*60}")
 
         train_futures = {}
@@ -695,15 +695,15 @@ def main(start: int = 1, train_only: bool = False):
                 tag = train_futures[f]
                 try:
                     f.result()
-                    print(f"\n✓ [{tag}] train 완료")
+                    print(f"\n✓ [{tag}] train complete")
                 except Exception as e:
-                    print(f"\n✗ [{tag}] 실패: {e}")
+                    print(f"\n✗ [{tag}] failed: {e}")
                     raise
 
-        print("\n=== Train only 완료 ===")
+        print("\n=== Train only complete ===")
         return
 
-    # 3+4. Train → Infer+Eval 파이프라인 (train 완료되는 대로 즉시 infer 시작)
+    # 3+4. Train → Infer+Eval pipeline (start infer as soon as train finishes)
     gpu_pool: queue.Queue[int] = queue.Queue()
     infer_queue: queue.Queue[tuple] = queue.Queue()
     eval_queue: queue.Queue[tuple] = queue.Queue()
@@ -717,10 +717,10 @@ def main(start: int = 1, train_only: bool = False):
     if start <= 3:
         train_gpus = detect_free_gpus(N_TRAIN_GPUS, strict=True)
         print(f"\n{'='*60}")
-        print(f"병렬 학습 + 즉시 Infer: {n_exp}개 크기 실험 (GPU: {train_gpus})")
+        print(f"Parallel training + immediate infer: {n_exp} size experiments (GPUs: {train_gpus})")
         print(f"{'='*60}")
 
-        # infer+eval worker 를 먼저 기동 (GPU pool 은 비어 있으므로 대기)
+        # Start infer+eval workers first (GPU pool is empty, so they'll wait)
         worker_threads = _start_workers(
             gpu_pool, infer_queue, eval_queue, all_submitted,
             n_total_eval, N_INFER_GPUS,
@@ -729,12 +729,12 @@ def main(start: int = 1, train_only: bool = False):
         )
 
         def train_then_enqueue(tag, counts, gpu_id):
-            """train 완료 후 해당 GPU 를 infer pool 에 넘기고 infer 태스크 제출."""
+            """After train completes, hand its GPU to the infer pool and submit infer tasks."""
             run_train_on_gpu(tag, counts, gpu_id)
-            # train 끝난 GPU 를 infer pool 에 투입
+            # Hand the freed GPU over to the infer pool
             gpu_pool.put(gpu_id)
-            print(f"[{tag}] GPU {gpu_id} → infer pool 투입")
-            # 해당 tag 의 infer 분할 태스크 제출
+            print(f"[{tag}] GPU {gpu_id} → handed to infer pool")
+            # Submit infer split tasks for this tag
             exp_dir = EXP_DIR / tag
             ckpt_dir = exp_dir / "checkpoints" / "final"
             for ds in EVAL_DATASETS:
@@ -756,19 +756,19 @@ def main(start: int = 1, train_only: bool = False):
                 tag = train_futures[f]
                 try:
                     f.result()
-                    print(f"\n✓ [{tag}] train+infer제출 완료")
+                    print(f"\n✓ [{tag}] train+infer submission complete")
                 except Exception as e:
-                    print(f"\n✗ [{tag}] 실패: {e}")
+                    print(f"\n✗ [{tag}] failed: {e}")
                     raise
 
-        # 모든 train 완료 → 더 이상 infer 태스크 추가 없음
+        # All train complete → no more infer tasks will be added
         all_submitted.set()
 
     else:
-        # start == 4: train 건너뛰고 infer+eval 만 실행
+        # start == 4: skip train, run infer+eval only
         infer_gpus = detect_free_gpus(N_INFER_GPUS, strict=True)
         print(f"\n{'='*60}")
-        print(f"Infer + Eval 시작 (GPU: {infer_gpus})")
+        print(f"Starting Infer + Eval (GPUs: {infer_gpus})")
         print(f"{'='*60}")
 
         for g in infer_gpus:
@@ -795,15 +795,15 @@ def main(start: int = 1, train_only: bool = False):
     for t in worker_threads:
         t.join()
 
-    print("\n=== Phase 2 완료 ===")
+    print("\n=== Phase 2 complete ===")
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Phase 2: 크기 탐색")
+    parser = argparse.ArgumentParser(description="Phase 2: size sweep")
     parser.add_argument("--start", type=int, default=1, choices=[1, 2, 3, 4],
-                        help="시작 단계 (1=generate, 2=convert+sample, 3=train, 4=infer+eval)")
+                        help="starting step (1=generate, 2=convert+sample, 3=train, 4=infer+eval)")
     parser.add_argument("--train-only", action="store_true",
-                        help="train 단계만 실행하고 모델 저장 후 종료 (infer+eval 생략)")
+                        help="run train step only, save model, then exit (skip infer+eval)")
     args = parser.parse_args()
     main(start=args.start, train_only=args.train_only)

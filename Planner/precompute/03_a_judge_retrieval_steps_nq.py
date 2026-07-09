@@ -1,14 +1,14 @@
 """
-Step 3 (NQ): Qwen2.5-14B-Instruct-GPTQ-Int4로 retrieval plan 품질 판정
+Step 3 (NQ): Judge retrieval plan quality with Qwen2.5-14B-Instruct-GPTQ-Int4
 
-Judge 입력: question, answer, supporting context (single source), predicted_steps
-Judge 출력: {"pass": bool, "reason": str}
+Judge input: question, answer, supporting context (single source), predicted_steps
+Judge output: {"pass": bool, "reason": str}
 
-NQ는 single-hop 데이터셋으로 supporting_context가 항상 1개.
-- pass=True  → 단계가 충분히 구체적 (쉬운 문제) → hard_selected에서 제외
-- pass=False → 단계가 너무 모호하거나 답을 도출할 수 없음 → hard_selected에 포함
+NQ is single-hop, so supporting_context always has exactly 1 item.
+- pass=True  → step is specific enough (easy question) → excluded from hard_selected
+- pass=False → step is too vague or can't derive the answer → included in hard_selected
 
-출력: data/precompute/nq_all_judged.jsonl
+Output: data/precompute/nq_all_judged.jsonl
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "12"))
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "1000"))
 MAX_RETRIES = 3
 MAX_TOKENS = 256
-MAX_CONTEXT_CHARS = 24_000  # 보수적: 숫자/특수문자 많으면 1토큰≈1.5글자까지 내려감
+MAX_CONTEXT_CHARS = 24_000  # conservative: with heavy digits/special chars, 1 token ≈ 1.5 chars
 
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
@@ -46,7 +46,7 @@ client: OpenAI | None = None
 
 
 # ──────────────────────────────────────────────
-# GPU / vLLM 관리
+# GPU / vLLM management
 # ──────────────────────────────────────────────
 
 def find_free_gpus(n: int = 1, min_free_mb: int = MIN_FREE_MB) -> list[str]:
@@ -63,7 +63,7 @@ def find_free_gpus(n: int = 1, min_free_mb: int = MIN_FREE_MB) -> list[str]:
             break
     if len(gpus) < n:
         raise RuntimeError(
-            f"여유 GPU {n}장 없음 (기준: {min_free_mb} MB 이상, 찾은 수: {len(gpus)})"
+            f"Not enough free GPUs: need {n} (>= {min_free_mb} MB free), found {len(gpus)}"
         )
     return gpus
 
@@ -79,7 +79,7 @@ def _ping(base_url: str) -> bool:
 def start_vllm(model_path: str, port: int, gpu_id: str, timeout: int = 300) -> subprocess.Popen | None:
     base_url = f"http://localhost:{port}/v1"
     if _ping(base_url):
-        print(f"[port {port}] vLLM 서버 이미 실행 중 — 기존 서버 사용.")
+        print(f"[port {port}] vLLM server already running — reusing it.")
         return None
 
     env = os.environ.copy()
@@ -89,7 +89,7 @@ def start_vllm(model_path: str, port: int, gpu_id: str, timeout: int = 300) -> s
     env.setdefault("NCCL_IB_DISABLE", "1")
 
     log_path = f"/tmp/vllm_{port}_stderr.log"
-    print(f"[port {port}] vLLM 시작 중... (model={Path(model_path).name}, GPU={gpu_id})")
+    print(f"[port {port}] Starting vLLM... (model={Path(model_path).name}, GPU={gpu_id})")
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
@@ -107,19 +107,19 @@ def start_vllm(model_path: str, port: int, gpu_id: str, timeout: int = 300) -> s
     for _ in range(timeout):
         time.sleep(1)
         if proc.poll() is not None:
-            raise RuntimeError(f"[port {port}] vLLM 프로세스가 예기치 않게 종료됨. 로그: {log_path}")
+            raise RuntimeError(f"[port {port}] vLLM process exited unexpectedly. Log: {log_path}")
         if _ping(base_url):
-            print(f"[port {port}] vLLM 준비 완료. (GPU {gpu_id})")
+            print(f"[port {port}] vLLM ready. (GPU {gpu_id})")
             return proc
 
     proc.terminate()
-    raise RuntimeError(f"[port {port}] vLLM 시작 시간 초과 ({timeout}초). 로그: {log_path}")
+    raise RuntimeError(f"[port {port}] vLLM startup timed out ({timeout}s). Log: {log_path}")
 
 
 def stop_vllm(proc: subprocess.Popen | None, port: int):
     if proc is None:
         return
-    print(f"[port {port}] vLLM 종료 중...")
+    print(f"[port {port}] Stopping vLLM...")
     proc.terminate()
     try:
         proc.wait(timeout=30)
@@ -158,11 +158,11 @@ The step asks for general plot details about April's baby rather than specifical
 
 
 def _truncate_context(ctx_text: str, answer: str) -> str:
-    """context가 너무 길면 answer 기준으로 잘라낸다."""
+    """If context is too long, truncate based on the answer."""
     sents = _SENT_SPLIT.split(ctx_text)
 
     if len(sents) >= 2:
-        # 문장 2개 이상: supporting sentence 보존, ±1 문장에서 자르기
+        # 2+ sentences: preserve the supporting sentence, truncate ±1 sentence around it
         sup_idx = None
         for i, s in enumerate(sents):
             if answer in s:
@@ -186,7 +186,7 @@ def _truncate_context(ctx_text: str, answer: str) -> str:
         parts = [p for p in (before, sup_sent, after) if p]
         return " ".join(parts)
 
-    # 문장 1개 (테이블 등): 단어 단위로 answer 중심 앞뒤 균등 자르기
+    # Single sentence (e.g. a table): trim word-by-word, evenly around the answer
     words = ctx_text.split()
     ans_idx = None
     for i, w in enumerate(words):
@@ -197,7 +197,7 @@ def _truncate_context(ctx_text: str, answer: str) -> str:
         ans_idx = 0
 
     half = MAX_CONTEXT_CHARS // 2
-    # answer 앞쪽: answer 직전부터 역순으로 half만큼
+    # Before the answer: take up to `half` chars, walking backward from just before it
     before_words = []
     used = 0
     for w in reversed(words[:ans_idx]):
@@ -207,7 +207,7 @@ def _truncate_context(ctx_text: str, answer: str) -> str:
         before_words.append(w)
         used += cost
     before_words.reverse()
-    # answer 뒤쪽: answer부터 순서대로 half만큼
+    # After the answer: take up to `half` chars, walking forward from it
     after_words = []
     used = 0
     for w in words[ans_idx:]:
@@ -271,10 +271,10 @@ def judge_item(item: dict) -> dict | None:
         except Exception as e:
             if attempt < MAX_RETRIES:
                 wait = 2 ** attempt
-                print(f"  RETRY {item['id']} ({attempt}/{MAX_RETRIES}): {e} — {wait}s 대기")
+                print(f"  RETRY {item['id']} ({attempt}/{MAX_RETRIES}): {e} — waiting {wait}s")
                 time.sleep(wait)
             else:
-                print(f"  ERROR {item['id']}: {e} (재시도 {MAX_RETRIES}회 실패)")
+                print(f"  ERROR {item['id']}: {e} (failed after {MAX_RETRIES} retries)")
                 return None
 
 
@@ -295,7 +295,7 @@ def main():
     proc = None
     if AUTO_VLLM:
         gpus = find_free_gpus(1)
-        print(f"사용 GPU: {gpus[0]} (port {JUDGE_PORT})")
+        print(f"Using GPU: {gpus[0]} (port {JUDGE_PORT})")
         proc = start_vllm(JUDGE_MODEL_PATH, JUDGE_PORT, gpus[0])
         client = OpenAI(api_key="EMPTY", base_url=f"http://localhost:{JUDGE_PORT}/v1")
     else:
@@ -314,7 +314,7 @@ def _main_process():
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     done_ids = load_done_ids(OUT_PATH)
-    print(f"기존 완료 항목: {len(done_ids)}개 (이어서 처리)")
+    print(f"Already complete: {len(done_ids)} (resuming)")
 
     written = 0
     failed = 0
@@ -352,7 +352,7 @@ def _main_process():
                 print(f"  Progress: {total_processed} new + {skipped} skipped (pass={passed}, fail={written-passed}, error={failed})")
                 batch = []
 
-        # 마지막 남은 batch 처리
+        # Process the final remaining batch
         if batch:
             with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
                 futures = {executor.submit(judge_item, it): it for it in batch}

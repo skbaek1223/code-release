@@ -1,9 +1,9 @@
 """
-Phase 1: 비율 탐색 (총량 1000 고정)
+Phase 1: ratio sweep (total fixed at 1000)
 
-1) generate  — 모든 실험에 필요한 goals 를 한 번에 생성 + SFT 변환
-2) sample + train — 대조군별 GPU 1개씩 할당, 병렬 실행
-3) infer + eval — 통합 worker 가 infer 우선 처리, 배정 완료 시 eval 병행
+1) generate  — generate all goals needed across every experiment at once + SFT conversion
+2) sample + train — allocate one GPU per condition, run in parallel
+3) infer + eval — unified worker handles infer first, runs eval as slots free up
 """
 import json
 import math
@@ -40,10 +40,10 @@ VAL_COUNTS = {"nq": 5000, "hotpotqa": 5000}
 SEED = 42
 
 
-# ── GPU 감지 ────────────────────────────────────────────────────
+# ── GPU detection ────────────────────────────────────────────────────
 
 def detect_free_gpus(n: int, min_free_mib: int = 10_000) -> list[int]:
-    """여유 GPU 를 n 개 이상 찾아 반환한다."""
+    """Find and return at least n free GPUs."""
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=index,memory.free",
          "--format=csv,noheader,nounits"],
@@ -58,7 +58,7 @@ def detect_free_gpus(n: int, min_free_mib: int = 10_000) -> list[int]:
             break
     if len(gpus) < n:
         raise RuntimeError(
-            f"여유 GPU {n}장 필요, {len(gpus)}장만 감지됨 (기준: {min_free_mib} MiB)")
+            f"Needed {n} free GPUs, only found {len(gpus)} (threshold: {min_free_mib} MiB)")
     return gpus
 
 
@@ -72,8 +72,8 @@ def count_goals(dataset: str) -> int:
 
 
 def step_generate(counts: dict[str, int]):
-    """각 데이터셋별로 goals 부족분을 생성하고 SFT 변환."""
-    print("\n=== [generate] goals 확인 및 생성 ===")
+    """Generate any goals shortfall per dataset and convert to SFT."""
+    print("\n=== [generate] checking and generating goals ===")
     need_rebuild = False
     for ds, n_train in counts.items():
         if n_train == 0:
@@ -82,7 +82,7 @@ def step_generate(counts: dict[str, int]):
         n_goals_exist = count_goals(ds)
         deficit = n_goals_needed - n_goals_exist
         if deficit > 0:
-            print(f"  {ds}: goals {n_goals_exist}개 → {n_goals_needed}개 필요, +{deficit}개 생성")
+            print(f"  {ds}: have {n_goals_exist} goals → need {n_goals_needed}, generating +{deficit}")
             cmd = [
                 sys.executable, str(PIPELINE_DIR / "02_generate_goals.py"),
                 ds, "--limit", str(deficit),
@@ -90,14 +90,14 @@ def step_generate(counts: dict[str, int]):
             subprocess.run(cmd, check=True)
             need_rebuild = True
         else:
-            print(f"  {ds}: goals {n_goals_exist}개 ≥ {n_goals_needed}개 필요, 충분")
+            print(f"  {ds}: have {n_goals_exist} goals ≥ {n_goals_needed} needed, sufficient")
 
     if need_rebuild or not TRAIN_JSONL.exists():
-        print("\n  04_sft_data_and_train.py convert 실행...")
+        print("\n  Running 04_sft_data_and_train.py convert...")
         cmd = [sys.executable, str(PIPELINE_DIR / "04_sft_data_and_train.py"), "convert"]
         subprocess.run(cmd, check=True)
     else:
-        print("\n  goals 변동 없음, SFT 변환 생략")
+        print("\n  No change in goals, skipping SFT conversion")
 
 
 def load_train_by_dataset(path: Path) -> dict[str, list[dict]]:
@@ -114,15 +114,15 @@ def step_sample(tag: str, counts: dict[str, int], seed: int):
     train_path = exp_dir / "train.jsonl"
     config_path = exp_dir / "config.json"
 
-    # 이미 동일 설정으로 샘플링된 파일이 있으면 건너뛰기
+    # Skip if a file already exists sampled with the same config
     if train_path.exists() and config_path.exists():
         with open(config_path) as f:
             existing = json.load(f)
         if existing.get("counts") == counts and existing.get("seed") == seed:
-            print(f"[{tag}] sample 이미 존재 ({existing['total']}개), 건너뛰기")
+            print(f"[{tag}] sample already exists ({existing['total']}), skipping")
             return
 
-    print(f"[{tag}] sample 시작")
+    print(f"[{tag}] starting sample")
     by_dataset = load_train_by_dataset(TRAIN_JSONL)
 
     rng = random.Random(seed)
@@ -132,7 +132,7 @@ def step_sample(tag: str, counts: dict[str, int], seed: int):
             continue
         pool = by_dataset.get(ds, [])
         if len(pool) < n:
-            print(f"  [{tag}] WARNING: {ds} 요청 {n}개 > 가용 {len(pool)}개, 전부 사용")
+            print(f"  [{tag}] WARNING: {ds} requested {n} > available {len(pool)}, using all")
             n = len(pool)
         sampled = rng.sample(pool, n)
         subset.extend(sampled)
@@ -148,53 +148,53 @@ def step_sample(tag: str, counts: dict[str, int], seed: int):
     with open(config_path, "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
-    print(f"[{tag}] sample 완료: {len(subset)}개 → {train_path}")
+    print(f"[{tag}] sample complete: {len(subset)} → {train_path}")
 
 
-# ── sample + train → infer_queue/eval_queue 에 태스크 제출 ─────
+# ── sample + train → submit tasks to infer_queue/eval_queue ─────
 
 def run_experiment_on_gpu(tag: str, counts: dict[str, int], gpu_id: int,
                           gpu_pool: queue.Queue, infer_queue: queue.Queue,
                           eval_queue: queue.Queue):
-    """sample → train 을 지정 GPU 에서 실행 후, infer 태스크를 큐에 제출."""
+    """Run sample → train on the given GPU, then submit an infer task to the queue."""
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     total = sum(counts.values())
     print(f"\n{'='*60}")
-    print(f"[{tag}] GPU {gpu_id} | nq={counts['nq']}, hotpotqa={counts['hotpotqa']} (총 {total})")
+    print(f"[{tag}] GPU {gpu_id} | nq={counts['nq']}, hotpotqa={counts['hotpotqa']} (total {total})")
     print(f"{'='*60}")
 
     # sample (CPU)
     step_sample(tag, counts, SEED)
 
-    # train — checkpoint 이 이미 있으면 건너뛰기
+    # train — skip if a checkpoint already exists
     exp_dir = EXP_DIR / tag
     ckpt_dir = exp_dir / "checkpoints" / "final"
     if ckpt_dir.exists() and any(ckpt_dir.iterdir()):
-        print(f"[{tag}] train 이미 완료 ({ckpt_dir}), 건너뛰기")
+        print(f"[{tag}] train already complete ({ckpt_dir}), skipping")
     else:
-        print(f"[{tag}] train 시작 (GPU {gpu_id})")
+        print(f"[{tag}] starting train (GPU {gpu_id})")
         subprocess.run([
             sys.executable, str(PIPELINE_DIR / "04_sft_data_and_train.py"), "train",
             "--train-data", str(exp_dir / "train.jsonl"),
             "--output-dir", str(exp_dir / "checkpoints"),
         ], env=env, check=True)
-        print(f"[{tag}] train 완료")
+        print(f"[{tag}] train complete")
 
-    # train 완료 → 이 실험의 GPU 를 풀에 반납
+    # train complete → return this experiment's GPU to the pool
     gpu_pool.put(gpu_id)
 
-    # infer 태스크를 큐에 제출
+    # Submit infer tasks to the queue
     for ds in EVAL_DATASETS:
         pred_path = exp_dir / f"predictions_{ds}.jsonl"
         if pred_path.exists():
             n_done = sum(1 for _ in open(pred_path))
             if n_done >= VAL_COUNTS[ds]:
-                print(f"[{tag}] infer {ds} 완료 ({n_done}개), 건너뛰기")
+                print(f"[{tag}] infer {ds} complete ({n_done}), skipping")
                 eval_queue.put((tag, ds))
                 continue
-            print(f"[{tag}] infer {ds} 불완전 ({n_done}/{VAL_COUNTS[ds]}개), 이어쓰기 예정")
+            print(f"[{tag}] infer {ds} incomplete ({n_done}/{VAL_COUNTS[ds]}), will resume")
         infer_queue.put((tag, ds, ckpt_dir, pred_path))
 
 
@@ -202,7 +202,7 @@ def run_experiment_on_gpu(tag: str, counts: dict[str, int], gpu_id: int,
 
 def _do_one_eval(eval_mod, tag: str, ds: str, client, model_name: str,
                  gpu_id: int):
-    """단일 (tag, ds) 평가. 이미 완료면 건너뛴다."""
+    """Evaluate a single (tag, ds). Skips if already complete."""
     exp_dir = EXP_DIR / tag
     pred_path = exp_dir / f"predictions_{ds}.jsonl"
     judge_path = exp_dir / f"judge_{ds}.jsonl"
@@ -210,16 +210,16 @@ def _do_one_eval(eval_mod, tag: str, ds: str, client, model_name: str,
     if judge_path.exists():
         n_judged = sum(1 for _ in open(judge_path))
         if n_judged >= VAL_COUNTS[ds]:
-            print(f"[GPU {gpu_id}] eval {tag}/{ds} 이미 완료 ({n_judged}개), 건너뛰기")
+            print(f"[GPU {gpu_id}] eval {tag}/{ds} already complete ({n_judged}), skipping")
             return
-    print(f"[GPU {gpu_id}] eval {tag}/{ds} 시작")
+    print(f"[GPU {gpu_id}] starting eval {tag}/{ds}")
     eval_mod._evaluate_dataset(
         pred_path, judge_path, ds, client, model_name, eval_mod.NUM_WORKERS,
     )
-    print(f"[GPU {gpu_id}] eval {tag}/{ds} 완료")
+    print(f"[GPU {gpu_id}] eval {tag}/{ds} complete")
 
 
-# ── 통합 worker (infer 우선 + eval 병행) ──────────────────────
+# ── unified worker (infer first + eval concurrently) ──────────────────────
 
 def _start_workers(
     gpu_pool: queue.Queue,
@@ -229,11 +229,11 @@ def _start_workers(
     n_total_eval: int,
     n_workers: int,
 ) -> list[threading.Thread]:
-    """infer/eval 통합 worker.
+    """Unified infer/eval worker.
 
-    infer_queue 에 미배정 태스크가 있으면 우선 처리하고,
-    모두 배정되었으면 eval_queue 에서 eval 태스크를 처리한다.
-    모든 infer 완료를 기다리지 않고 eval 을 병행한다.
+    Processes unassigned tasks from infer_queue first when present; once all
+    have been assigned, processes eval tasks from eval_queue. Eval runs
+    concurrently rather than waiting for all infer to finish.
     """
     from openai import OpenAI
     sys.path.insert(0, str(PIPELINE_DIR))
@@ -248,7 +248,7 @@ def _start_workers(
         port = 8010 + worker_id
 
         while not all_eval_done.is_set():
-            # ── 1) infer 우선 처리 ──────────────────────────────
+            # ── 1) infer takes priority ──────────────────────────────
             infer_task = None
             try:
                 infer_task = infer_queue.get_nowait()
@@ -267,19 +267,19 @@ def _start_workers(
                         "--output", str(pred_path),
                         "--dataset", ds,
                     ]
-                    print(f"[{tag}] infer {ds} 시작 (GPU {gpu_id})")
+                    print(f"[{tag}] starting infer {ds} (GPU {gpu_id})")
                     subprocess.run(cmd, env=env, check=True)
-                    print(f"[{tag}] infer {ds} 완료 (GPU {gpu_id})")
+                    print(f"[{tag}] infer {ds} complete (GPU {gpu_id})")
                 finally:
                     gpu_pool.put(gpu_id)
                 eval_queue.put((tag, ds))
                 continue
 
-            # ── 2) eval 처리 (non-blocking, infer 우선권 유지) ──
+            # ── 2) eval processing (non-blocking, infer keeps priority) ──
             try:
                 tag, ds = eval_queue.get_nowait()
             except queue.Empty:
-                # 양쪽 다 비어 있으면 종료 확인 또는 대기
+                # Both empty: check for completion, or wait
                 if all_submitted.is_set() and infer_queue.empty():
                     with counter_lock:
                         if eval_completed[0] >= n_total_eval:
@@ -294,7 +294,7 @@ def _start_workers(
             client = None
             try:
                 while True:
-                    # eval 중에도 미배정 infer 가 있으면 양보
+                    # Yield to any unassigned infer task even mid-eval
                     if not infer_queue.empty():
                         eval_queue.put((tag, ds))
                         break
@@ -324,11 +324,11 @@ def _start_workers(
                     if all_eval_done.is_set():
                         break
 
-                    # 미배정 infer 가 있으면 vLLM 정리 후 양보
+                    # Yield and tear down vLLM if an unassigned infer task appears
                     if not infer_queue.empty():
                         break
 
-                    # 다음 eval 태스크 (non-blocking)
+                    # Next eval task (non-blocking)
                     try:
                         tag, ds = eval_queue.get_nowait()
                     except queue.Empty:
@@ -349,14 +349,14 @@ def _start_workers(
 # ── main ────────────────────────────────────────────────────────
 
 def step_precompute_val():
-    """val 데이터를 precompute (이미 존재하면 건너뛰기)."""
-    print("\n=== [precompute] val 데이터 확인 ===")
+    """Precompute val data (skip if it already exists)."""
+    print("\n=== [precompute] checking val data ===")
     from importlib import import_module
     val_loader = import_module("01_val_loader")
     for ds in EVAL_DATASETS:
         val_path = val_loader.VAL_DIR / f"{ds}_val.jsonl"
         if val_path.exists() and val_path.stat().st_size > 0:
-            print(f"  {ds}: 이미 존재 ({val_path}), 건너뛰기")
+            print(f"  {ds}: already exists ({val_path}), skipping")
         else:
             val_loader.precompute(ds)
 
@@ -364,36 +364,36 @@ def step_precompute_val():
 def main():
     n_exp = len(EXPERIMENTS)
 
-    # 0. GPU 확보
+    # 0. Acquire GPUs
     gpu_ids = detect_free_gpus(n_exp)
-    print(f"사용할 GPU: {gpu_ids} ({n_exp}개 대조군)")
+    print(f"Using GPUs: {gpu_ids} ({n_exp} conditions)")
 
-    # 0.5. Val 데이터 precompute (05, 06 에서 사용)
+    # 0.5. Precompute val data (used by 05, 06)
     step_precompute_val()
 
-    # 1. Generate: 모든 실험에 필요한 최대 개수만큼 한 번에 생성
+    # 1. Generate: generate the max count needed across all experiments at once
     max_counts: dict[str, int] = {}
     for exp in EXPERIMENTS:
         for ds in TRAIN_DATASETS:
             max_counts[ds] = max(max_counts.get(ds, 0), exp[ds])
-    print(f"데이터셋별 최대 필요량: {max_counts}")
+    print(f"Max needed per dataset: {max_counts}")
     step_generate(max_counts)
 
-    # 2. 큐 생성
+    # 2. Create queues
     gpu_pool: queue.Queue[int] = queue.Queue()
     infer_queue: queue.Queue[tuple] = queue.Queue()
     eval_queue: queue.Queue[tuple[str, str]] = queue.Queue()
     all_submitted = threading.Event()
 
-    # 3. 통합 worker 시작 (infer 우선 처리, eval 병행)
+    # 3. Start unified workers (infer first, eval concurrently)
     n_total_eval = n_exp * len(EVAL_DATASETS)
     worker_threads = _start_workers(
         gpu_pool, infer_queue, eval_queue, all_submitted, n_total_eval, n_exp,
     )
 
-    # 4. Sample + Train → infer_queue / eval_queue 에 태스크 제출
+    # 4. Sample + Train → submit tasks to infer_queue / eval_queue
     print(f"\n{'='*60}")
-    print(f"병렬 실행: {n_exp}개 대조군 × {n_exp}개 GPU")
+    print(f"Running in parallel: {n_exp} conditions × {n_exp} GPUs")
     print(f"{'='*60}")
 
     train_futures = {}
@@ -410,20 +410,20 @@ def main():
             tag = train_futures[f]
             try:
                 f.result()
-                print(f"\n✓ [{tag}] sample+train 완료, infer/eval 제출됨")
+                print(f"\n✓ [{tag}] sample+train complete, infer/eval submitted")
             except Exception as e:
-                print(f"\n✗ [{tag}] 실패: {e}")
+                print(f"\n✗ [{tag}] failed: {e}")
                 raise
 
-    # 모든 train 완료 → 더 이상 새 태스크 없음
+    # All train complete → no more new tasks
     all_submitted.set()
-    print(f"\n=== 모든 태스크 제출 완료, worker 완료 대기 ===")
+    print(f"\n=== All tasks submitted, waiting for workers to finish ===")
 
-    # worker 완료 대기
+    # Wait for workers to finish
     for t in worker_threads:
         t.join()
 
-    print("\n=== Phase 1 완료 ===")
+    print("\n=== Phase 1 complete ===")
 
 
 if __name__ == "__main__":

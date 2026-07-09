@@ -1,11 +1,11 @@
 """
-Step 6: SFT 모델의 val 출력을 LLM-as-Judge로 평가
+Step 6: Evaluate the SFT model's val outputs with LLM-as-Judge
 
-val 데이터: hard_selected 중 goals 미생성 항목 (01_val_loader 에서 precompute)
+Val data: hard_selected items that didn't get goals generated (precomputed in 01_val_loader)
 
-precompute/03_a,b,c 와 동일한 프롬프트·모델·파싱 로직을 사용합니다.
-- NQ (single-hop): Qwen2.5-14B, single-hop 전용 프롬프트
-- HotpotQA (multi-hop): Qwen2.5-32B, multi-hop 전용 프롬프트
+Uses the same prompts, models, and parsing logic as precompute/03_a,b,c.
+- NQ (single-hop): Qwen2.5-14B, single-hop-specific prompt
+- HotpotQA (multi-hop): Qwen2.5-32B, multi-hop-specific prompt
 
 Usage:
     python 06_evaluate_val.py --predictions pred.jsonl --dataset hotpotqa
@@ -44,7 +44,7 @@ _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 _VERDICT_RE = re.compile(r"^\s*(PASS|FAIL)\s*$", re.MULTILINE | re.IGNORECASE)
 
 
-# ── 데이터셋별 설정 ─────────────────────────────────────────────
+# ── per-dataset config ─────────────────────────────────────────────
 
 DATASET_CONFIGS = {
     "nq": {
@@ -59,7 +59,7 @@ DATASET_CONFIGS = {
     },
 }
 
-# ── NQ single-hop 프롬프트 (03_a 동일) ──────────────────────────
+# ── NQ single-hop prompt (same as 03_a) ──────────────────────────
 
 NQ_JUDGE_SYSTEM = """You are a quality judge for a single-hop retrieval plan.
 
@@ -91,7 +91,7 @@ Answer: Osteogenesis Imperfecta type 2
 FAIL
 The step asks for general plot details about April's baby rather than specifically asking what medical condition the baby was diagnosed with, so it would retrieve many unrelated plot points instead of reliably targeting the supporting context about the Osteogenesis Imperfecta diagnosis."""
 
-# ── Multi-hop 프롬프트 (03_b, 03_c 동일) ────────────────────────
+# ── Multi-hop prompt (same as 03_b, 03_c) ────────────────────────
 
 MULTIHOP_JUDGE_SYSTEM = """You are a quality judge for a multi-hop retrieval plan.
 
@@ -128,7 +128,7 @@ FAIL
 Both steps vaguely ask to "find information about" each director's approach to mainstream commercialism rather than specifically asking whether each director went against it — the overly broad queries would retrieve general biographical information instead of reliably targeting the specific fact in [Source 2] about Żuławski's anti-commercial stance."""
 
 
-# ── NQ context truncation (03_a 동일) ────────────────────────────
+# ── NQ context truncation (same as 03_a) ────────────────────────────
 
 def _truncate_context(ctx_text: str, answer: str) -> str:
     sents = _SENT_SPLIT.split(ctx_text)
@@ -190,10 +190,10 @@ def _truncate_context(ctx_text: str, answer: str) -> str:
     return prefix + " ".join(before_words + after_words) + suffix
 
 
-# ── 프롬프트 구성 ────────────────────────────────────────────────
+# ── prompt construction ────────────────────────────────────────────────
 
 def make_judge_prompt_nq(item: dict) -> str:
-    """03_a 와 동일: single-hop 프롬프트"""
+    """Same as 03_a: single-hop prompt"""
     lines = [f"Question: {item['question']}"]
 
     steps = item.get("predicted_steps", [])
@@ -213,7 +213,7 @@ def make_judge_prompt_nq(item: dict) -> str:
 
 
 def make_judge_prompt_multihop(item: dict) -> str:
-    """03_b, 03_c 와 동일: multi-hop 프롬프트"""
+    """Same as 03_b, 03_c: multi-hop prompt"""
     lines = [f"Question: {item['question']}"]
 
     steps = item.get("predicted_steps", [])
@@ -231,7 +231,7 @@ def make_judge_prompt_multihop(item: dict) -> str:
     return "\n\n".join(lines)
 
 
-# ── GPU / vLLM 관리 ──────────────────────────────────────────────
+# ── GPU / vLLM management ──────────────────────────────────────────────
 
 def find_free_gpus(n: int = 1, min_free_mb: int = MIN_FREE_MB) -> list[str]:
     result = subprocess.run(
@@ -247,7 +247,7 @@ def find_free_gpus(n: int = 1, min_free_mb: int = MIN_FREE_MB) -> list[str]:
             break
     if len(gpus) < n:
         raise RuntimeError(
-            f"여유 GPU {n}장 없음 (기준: {min_free_mb} MB 이상, 찾은 수: {len(gpus)})"
+            f"Not enough free GPUs: need {n} (>= {min_free_mb} MB free), found {len(gpus)}"
         )
     return gpus
 
@@ -263,7 +263,7 @@ def _ping(base_url: str) -> bool:
 def start_vllm(model_path: str, model_name: str, port: int, gpu_id: str, timeout: int = 300) -> subprocess.Popen | None:
     base_url = f"http://localhost:{port}/v1"
     if _ping(base_url):
-        print(f"[port {port}] vLLM 서버 이미 실행 중 — 기존 서버 사용.")
+        print(f"[port {port}] vLLM server already running — reusing it.")
         return None
 
     env = os.environ.copy()
@@ -273,7 +273,7 @@ def start_vllm(model_path: str, model_name: str, port: int, gpu_id: str, timeout
     env.setdefault("NCCL_IB_DISABLE", "1")
 
     log_path = f"/tmp/vllm_{port}_stderr.log"
-    print(f"[port {port}] vLLM 시작 중... (model={Path(model_path).name}, GPU={gpu_id})")
+    print(f"[port {port}] Starting vLLM... (model={Path(model_path).name}, GPU={gpu_id})")
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
@@ -291,19 +291,19 @@ def start_vllm(model_path: str, model_name: str, port: int, gpu_id: str, timeout
     for _ in range(timeout):
         time.sleep(1)
         if proc.poll() is not None:
-            raise RuntimeError(f"[port {port}] vLLM 프로세스가 예기치 않게 종료됨. 로그: {log_path}")
+            raise RuntimeError(f"[port {port}] vLLM process exited unexpectedly. Log: {log_path}")
         if _ping(base_url):
-            print(f"[port {port}] vLLM 준비 완료. (GPU {gpu_id})")
+            print(f"[port {port}] vLLM ready. (GPU {gpu_id})")
             return proc
 
     proc.terminate()
-    raise RuntimeError(f"[port {port}] vLLM 시작 시간 초과 ({timeout}초). 로그: {log_path}")
+    raise RuntimeError(f"[port {port}] vLLM startup timed out ({timeout}s). Log: {log_path}")
 
 
 def stop_vllm(proc: subprocess.Popen | None, port: int):
     if proc is None:
         return
-    print(f"[port {port}] vLLM 종료 중...")
+    print(f"[port {port}] Stopping vLLM...")
     proc.terminate()
     try:
         proc.wait(timeout=30)
@@ -311,7 +311,7 @@ def stop_vllm(proc: subprocess.Popen | None, port: int):
         proc.kill()
 
 
-# ── 판정 ─────────────────────────────────────────────────────────
+# ── judging ─────────────────────────────────────────────────────────
 
 def parse_predicted_steps(raw: dict) -> list[str] | None:
     if "predicted_steps" in raw:
@@ -335,7 +335,7 @@ def load_predictions(pred_path: Path) -> dict[str, list[str]]:
             if steps is not None:
                 preds[raw["id"]] = steps
             else:
-                print(f"WARNING: {raw['id']} 파싱 실패 — predicted_steps 필드 필요")
+                print(f"WARNING: {raw['id']} parse failed — predicted_steps field required")
     return preds
 
 
@@ -345,7 +345,7 @@ def judge_single(
     oai_client: OpenAI,
     model_name: str,
 ) -> dict:
-    """item에 predicted_steps, supporting_context 가 포함된 상태로 호출. 03_abc 와 동일."""
+    """Called with item already containing predicted_steps and supporting_context. Same as 03_abc."""
     if dataset == "nq":
         system = NQ_JUDGE_SYSTEM
         prompt = make_judge_prompt_nq(item)
@@ -387,10 +387,10 @@ def judge_single(
         except Exception as e:
             if attempt < MAX_RETRIES:
                 wait = 2 ** attempt
-                print(f"  RETRY {item['id']} ({attempt}/{MAX_RETRIES}): {e} — {wait}s 대기")
+                print(f"  RETRY {item['id']} ({attempt}/{MAX_RETRIES}): {e} — waiting {wait}s")
                 time.sleep(wait)
             else:
-                print(f"  ERROR {item['id']}: {e} (재시도 {MAX_RETRIES}회 실패)")
+                print(f"  ERROR {item['id']}: {e} (failed after {MAX_RETRIES} retries)")
                 return {
                     "id": item["id"],
                     "pass": False,
@@ -403,12 +403,12 @@ def judge_single(
 def print_summary(results: list[dict]) -> None:
     n_total = len(results)
     if n_total == 0:
-        print("평가 결과 없음.")
+        print("No evaluation results.")
         return
 
     n_pass = sum(1 for r in results if r["pass"])
-    print("\n=== 평가 요약 ===")
-    print(f"전체: {n_total}개")
+    print("\n=== Evaluation summary ===")
+    print(f"Total: {n_total}")
     print(f"PASS: {n_pass} ({100 * n_pass / n_total:.1f}%)")
     print(f"FAIL: {n_total - n_pass} ({100 * (n_total - n_pass) / n_total:.1f}%)")
 
@@ -423,7 +423,7 @@ def _evaluate_dataset(
     model_name: str,
     max_workers: int,
 ) -> None:
-    """vLLM 이 이미 실행 중인 상태에서 단일 데이터셋 평가."""
+    """Evaluate a single dataset, assuming vLLM is already running."""
     val_items = load_val_items(dataset)
     preds = load_predictions(pred_path)
 
@@ -434,13 +434,13 @@ def _evaluate_dataset(
 
     unknown_ids = [id_ for id_ in preds if id_ not in val_items]
     if unknown_ids:
-        print(f"WARNING: predictions에 val에 없는 id {len(unknown_ids)}개 (스킵): {unknown_ids[:3]}")
+        print(f"WARNING: {len(unknown_ids)} prediction ids not found in val (skipping): {unknown_ids[:3]}")
 
     if not eval_items:
-        print(f"[{dataset}] 평가할 항목이 없습니다.")
+        print(f"[{dataset}] No items to evaluate.")
         return
 
-    # 이미 평가된 ID 확인 → 이어쓰기
+    # Check for already-evaluated IDs → resume
     done_ids: set[str] = set()
     existing_results: list[dict] = []
     if output_path.exists():
@@ -453,14 +453,14 @@ def _evaluate_dataset(
                 except (json.JSONDecodeError, KeyError):
                     pass
         if done_ids:
-            print(f"기존 {len(done_ids)}개 완료, 나머지 이어쓰기")
+            print(f"{len(done_ids)} already complete, resuming the rest")
 
     remaining = [item for item in eval_items if item["id"] not in done_ids]
     if not remaining:
-        print(f"[{dataset}] 모든 항목 평가 완료, 건너뛰기")
+        print(f"[{dataset}] All items already evaluated, skipping")
         return
 
-    print(f"평가 대상: {len(remaining)}개 (dataset: {dataset}, model: {model_name}, workers: {max_workers})")
+    print(f"Evaluating: {len(remaining)} items (dataset: {dataset}, model: {model_name}, workers: {max_workers})")
 
     results: list[dict] = list(existing_results)
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -480,12 +480,12 @@ def _evaluate_dataset(
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    print(f"\n결과 저장: {output_path}")
+    print(f"\nResults saved: {output_path}")
     print_summary(results)
 
 
 def run(pred_path: Path, output_path: Path, dataset: str, max_workers: int = NUM_WORKERS) -> None:
-    """단일 데이터셋 평가 (CLI 용)."""
+    """Evaluate a single dataset (for CLI use)."""
     cfg = DATASET_CONFIGS[dataset]
     model_name = cfg["model_name"]
     model_path = cfg["model_path"]
@@ -505,13 +505,13 @@ def run_multi(
     tasks: list[tuple[Path, Path, str]],
     max_workers: int = NUM_WORKERS,
 ) -> None:
-    """복수 데이터셋 평가. 같은 모델끼리 묶어서 vLLM 을 한 번만 띄움.
+    """Evaluate multiple datasets. Groups datasets by model so vLLM is only started once per model.
 
     tasks: [(pred_path, output_path, dataset), ...]
     """
     from collections import defaultdict
 
-    # 모델별로 데이터셋 묶기
+    # Group datasets by model
     by_model: dict[tuple[str, str, int], list[tuple[Path, Path, str]]] = defaultdict(list)
     for pred_path, output_path, dataset in tasks:
         cfg = DATASET_CONFIGS[dataset]
@@ -522,13 +522,13 @@ def run_multi(
 
     for (model_name, model_path, port), group in by_model.items():
         ds_names = [ds for _, _, ds in group]
-        print(f"\n=== vLLM 시작: {model_name} (datasets: {ds_names}) ===")
+        print(f"\n=== Starting vLLM: {model_name} (datasets: {ds_names}) ===")
         proc = start_vllm(model_path, model_name, port, gpus[0])
         oai_client = OpenAI(api_key="EMPTY", base_url=f"http://localhost:{port}/v1")
 
         try:
             for pred_path, output_path, dataset in group:
-                print(f"\n--- {dataset} 평가 ---")
+                print(f"\n--- Evaluating {dataset} ---")
                 _evaluate_dataset(pred_path, output_path, dataset, oai_client, model_name, max_workers)
         finally:
             stop_vllm(proc, port)
@@ -538,19 +538,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--predictions", required=True, type=Path,
-        help="SFT 모델 예측 JSONL (id + predicted_steps 필드)",
+        help="SFT model prediction JSONL (id + predicted_steps fields)",
     )
     parser.add_argument(
         "--dataset", required=True, choices=["nq", "hotpotqa"],
-        help="평가 데이터셋",
+        help="Dataset to evaluate",
     )
     parser.add_argument(
         "--output", type=Path, default=None,
-        help="판정 결과 저장 경로 (기본: data/eval/{dataset}_val_judge.jsonl)",
+        help="Path to save judge results (default: data/eval/{dataset}_val_judge.jsonl)",
     )
     parser.add_argument(
         "--workers", type=int, default=NUM_WORKERS,
-        help="병렬 요청 수 (기본: 12)",
+        help="Number of parallel requests (default: 12)",
     )
     args = parser.parse_args()
     if args.output is None:

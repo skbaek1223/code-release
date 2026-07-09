@@ -1,10 +1,10 @@
 """
-Step 2b: Qwen/Qwen2.5-14B-Instruct-GPTQ-Int4 로 HotpotQA retrieval steps 생성
+Step 2b: Generate HotpotQA retrieval steps with Qwen/Qwen2.5-14B-Instruct-GPTQ-Int4
 
-- question 만 입력 (supporting context 미사용)
-- vLLM OpenAI-compatible API (기본 port 8000)
-- 출력: data/precompute/hotpotqa_all_with_steps.jsonl
-- 형식: <id>\t<step> (한 줄에 하나의 step)
+- Input is the question only (no supporting context)
+- vLLM OpenAI-compatible API (default port 8000)
+- Output: data/precompute/hotpotqa_all_with_steps.jsonl
+- Format: <id>\t<step> (one step per line)
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ _STEP_RE = re.compile(r"^\s*\d+[\.\)]\s*(.+)", re.MULTILINE)
 
 
 # ──────────────────────────────────────────────
-# GPU / vLLM 관리
+# GPU / vLLM management
 # ──────────────────────────────────────────────
 
 def find_free_gpus(n: int = 1, min_free_mb: int = MIN_FREE_MB) -> list[str]:
@@ -72,7 +72,7 @@ def find_free_gpus(n: int = 1, min_free_mb: int = MIN_FREE_MB) -> list[str]:
             break
     if len(gpus) < n:
         raise RuntimeError(
-            f"여유 GPU {n}장 없음 (기준: {min_free_mb} MB 이상, 찾은 수: {len(gpus)})"
+            f"Not enough free GPUs: need {n} (>= {min_free_mb} MB free), found {len(gpus)}"
         )
     return gpus
 
@@ -88,7 +88,7 @@ def _ping(base_url: str) -> bool:
 def start_vllm(model_path: str, port: int, gpu_id: str, timeout: int = 300) -> subprocess.Popen | None:
     base_url = f"http://localhost:{port}/v1"
     if _ping(base_url):
-        print(f"[port {port}] vLLM 서버 이미 실행 중 — 기존 서버 사용.")
+        print(f"[port {port}] vLLM server already running — reusing it.")
         return None
 
     env = os.environ.copy()
@@ -98,7 +98,7 @@ def start_vllm(model_path: str, port: int, gpu_id: str, timeout: int = 300) -> s
     env.setdefault("NCCL_IB_DISABLE", "1")
 
     log_path = f"/tmp/vllm_{port}_stderr.log"
-    print(f"[port {port}] vLLM 시작 중... (model={Path(model_path).name}, GPU={gpu_id})")
+    print(f"[port {port}] Starting vLLM... (model={Path(model_path).name}, GPU={gpu_id})")
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
@@ -116,19 +116,19 @@ def start_vllm(model_path: str, port: int, gpu_id: str, timeout: int = 300) -> s
     for _ in range(timeout):
         time.sleep(1)
         if proc.poll() is not None:
-            raise RuntimeError(f"[port {port}] vLLM 프로세스가 예기치 않게 종료됨. 로그: {log_path}")
+            raise RuntimeError(f"[port {port}] vLLM process exited unexpectedly. Log: {log_path}")
         if _ping(base_url):
-            print(f"[port {port}] vLLM 준비 완료. (GPU {gpu_id})")
+            print(f"[port {port}] vLLM ready. (GPU {gpu_id})")
             return proc
 
     proc.terminate()
-    raise RuntimeError(f"[port {port}] vLLM 시작 시간 초과 ({timeout}초). 로그: {log_path}")
+    raise RuntimeError(f"[port {port}] vLLM startup timed out ({timeout}s). Log: {log_path}")
 
 
 def stop_vllm(proc: subprocess.Popen | None, port: int):
     if proc is None:
         return
-    print(f"[port {port}] vLLM 종료 중...")
+    print(f"[port {port}] Stopping vLLM...")
     proc.terminate()
     try:
         proc.wait(timeout=30)
@@ -186,7 +186,7 @@ def main():
     proc = None
     if AUTO_VLLM:
         gpus = find_free_gpus(1)
-        print(f"사용 GPU: {gpus[0]} (port {GENERATOR_PORT})")
+        print(f"Using GPU: {gpus[0]} (port {GENERATOR_PORT})")
         proc = start_vllm(GENERATOR_MODEL_PATH, GENERATOR_PORT, gpus[0])
         _clients = [OpenAI(api_key="EMPTY", base_url=f"http://localhost:{GENERATOR_PORT}/v1")]
     else:
@@ -238,7 +238,7 @@ def _main_process():
                 print(f"  Progress: {total_processed} (written={written}, failed={failed})")
                 batch = []
 
-        # 마지막 남은 batch 처리
+        # Process the final remaining batch
         if batch:
             with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
                 futures = {executor.submit(generate_steps, it): it for it in batch}

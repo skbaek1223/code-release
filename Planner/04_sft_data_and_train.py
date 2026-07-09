@@ -1,10 +1,10 @@
 """
-Step 4: SFT 데이터 생성 + QLoRA SFT 학습
+Step 4: Generate SFT data + QLoRA SFT training
 
-02_generate_goals.py 로 필터링된 goals (*_goals_filtered.jsonl) 을 사용합니다.
+Uses goals filtered by 02_generate_goals.py (*_goals_filtered.jsonl).
 
 Subcommands:
-    python 04_sft_data_and_train.py convert            # filtered goals → train/val JSONL 변환
+    python 04_sft_data_and_train.py convert            # convert filtered goals → train/val JSONL
     python 04_sft_data_and_train.py train --train-data data/sft/train.jsonl --output-dir checkpoints/exp_full
 """
 import argparse
@@ -27,7 +27,7 @@ MODEL_ID = "Qwen/Qwen3-8B"
 VAL_DATA = Path(__file__).parent.parent / "data" / "sft" / "val.jsonl"
 
 
-# ── convert (기존 03_make_sft_data.py) ─────────────────────────
+# ── convert (formerly 03_make_sft_data.py) ─────────────────────────
 
 def item_to_sft(item: dict) -> dict:
     if "plan" in item:
@@ -58,17 +58,17 @@ def convert(val_ratio: float = 0.05):
         if p.stem.replace("_goals_filtered", "") in TRAIN_DATASETS
     )
     if not goal_files:
-        raise FileNotFoundError(f"goals 파일 없음: {GOALS_DIR}")
+        raise FileNotFoundError(f"No goals files found: {GOALS_DIR}")
 
     all_items: list[dict] = []
     for path in goal_files:
         items = [json.loads(line) for line in open(path)]
         dataset_name = path.stem.replace("_goals_filtered", "")
-        print(f"{dataset_name}: {len(items)}개 로드")
+        print(f"{dataset_name}: loaded {len(items)}")
         all_items.extend(items)
 
     random.shuffle(all_items)
-    print(f"전체: {len(all_items)}개")
+    print(f"total: {len(all_items)}")
 
     val_count = max(1, int(len(all_items) * val_ratio))
     val = all_items[:val_count]
@@ -78,16 +78,16 @@ def convert(val_ratio: float = 0.05):
     with open(val_path, "w") as f:
         for item in val:
             f.write(json.dumps(item_to_sft(item), ensure_ascii=False) + "\n")
-    print(f"val 저장: {len(val)}개 → {val_path}")
+    print(f"saved val: {len(val)} → {val_path}")
 
     train_path = SFT_DIR / "train.jsonl"
     with open(train_path, "w") as f:
         for item in train:
             f.write(json.dumps(item_to_sft(item), ensure_ascii=False) + "\n")
-    print(f"train 저장: {len(train)}개 → {train_path}")
+    print(f"saved train: {len(train)} → {train_path}")
 
 
-# ── train (기존 04_sft_train.py) ───────────────────────────────
+# ── train (formerly 04_sft_train.py) ───────────────────────────────
 
 import torch
 from datasets import Dataset
@@ -103,7 +103,7 @@ from trl import SFTConfig, SFTTrainer
 
 @dataclass
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
-    """assistant 응답 토큰에만 loss 계산."""
+    """Compute loss only on assistant response tokens."""
 
     response_template: Union[str, List[int]] = None
     ignore_index: int = -100
@@ -164,13 +164,13 @@ def train(train_data: Path, output_dir: Path):
     if "CUDA_VISIBLE_DEVICES" not in os.environ:
         free_gpus = get_free_gpus()
         if not free_gpus:
-            raise RuntimeError("사용 가능한 GPU가 없습니다.")
+            raise RuntimeError("No available GPUs.")
         os.environ["CUDA_VISIBLE_DEVICES"] = str(free_gpus[0])
-        print(f"사용 GPU (자동 감지): {free_gpus}")
+        print(f"Using GPUs (auto-detected): {free_gpus}")
     else:
-        print(f"사용 GPU: {os.environ['CUDA_VISIBLE_DEVICES']}")
+        print(f"Using GPUs: {os.environ['CUDA_VISIBLE_DEVICES']}")
 
-    print(f"train data: {train_data} ({sum(1 for _ in open(train_data))}개)")
+    print(f"train data: {train_data} ({sum(1 for _ in open(train_data))} items)")
     print(f"output dir: {output_dir}")
 
     # Tokenizer
@@ -266,11 +266,11 @@ def train(train_data: Path, output_dir: Path):
     ckpts = sorted(output_dir.glob("checkpoint-*"))
     if ckpts:
         ckpt = str(ckpts[-1])
-        print(f"체크포인트에서 재개: {ckpt}")
+        print(f"Resuming from checkpoint: {ckpt}")
     trainer.train(resume_from_checkpoint=ckpt)
     final_dir = output_dir / "final"
     trainer.save_model(str(final_dir))
-    print(f"모델 저장 → {final_dir}")
+    print(f"Model saved → {final_dir}")
 
 
 # ── CLI ────────────────────────────────────────────────────────
@@ -279,11 +279,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("convert", help="goals → train/val JSONL 변환")
+    sub.add_parser("convert", help="convert goals → train/val JSONL")
 
-    train_parser = sub.add_parser("train", help="QLoRA SFT 학습")
-    train_parser.add_argument("--train-data", required=True, type=Path, help="train JSONL 경로")
-    train_parser.add_argument("--output-dir", required=True, type=Path, help="체크포인트 저장 디렉토리")
+    train_parser = sub.add_parser("train", help="QLoRA SFT training")
+    train_parser.add_argument("--train-data", required=True, type=Path, help="Path to train JSONL")
+    train_parser.add_argument("--output-dir", required=True, type=Path, help="Directory to save checkpoints")
 
     args = parser.parse_args()
     if args.command == "convert":

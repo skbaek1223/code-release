@@ -1,8 +1,8 @@
 """
-Step 1: HotpotQA train 데이터 로드 및 전처리
+Step 1: Load and preprocess HotpotQA train data
 
-- supporting_facts 기준으로 context snippet 추출
-- 출력: data/precompute/hotpotqa_all.jsonl
+- Extract context snippets based on supporting_facts
+- Output: data/precompute/hotpotqa_all.jsonl
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ TRAIN_FILES = [
     DATA_DIR / "train-00001-of-00002.parquet",
 ]
 
-CONTEXT_WINDOW = 1  # supporting sent_id 앞뒤로 몇 문장 포함할지
+CONTEXT_WINDOW = 1  # how many sentences to include before/after the supporting sent_id
 
 
 def extract_supporting_snippets(row) -> list[dict]:

@@ -1,14 +1,14 @@
 """
-Step 3: Qwen2.5-32B-Instruct-GPTQ-Int4로 retrieval plan 품질 판정
+Step 3: Judge retrieval plan quality with Qwen2.5-32B-Instruct-GPTQ-Int4
 
-Judge 입력: question, answer, supporting context, predicted_steps
-Judge 출력: {"pass": bool, "reason": str}
+Judge input: question, answer, supporting context, predicted_steps
+Judge output: {"pass": bool, "reason": str}
 
-- pass=True  → Qwen이 충분한 plan 생성 (쉬운 문제) → hard_selected에서 제외
-- pass=False → plan이 불충분 (어려운 문제) → hard_selected에 포함
+- pass=True  → Qwen produced a sufficient plan (easy question) → excluded from hard_selected
+- pass=False → plan was insufficient (hard question) → included in hard_selected
 
-GPU 2장을 사용하여 입력을 반으로 나눠 병렬 처리 후 합침.
-출력: data/precompute/hotpotqa_all_judged.jsonl
+Uses 2 GPUs, splitting the input in half for parallel processing then merging.
+Output: data/precompute/hotpotqa_all_judged.jsonl
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ OUT_PATH = DATA_DIR / "hotpotqa_all_judged.jsonl"
 
 
 # ──────────────────────────────────────────────
-# GPU / vLLM 관리
+# GPU / vLLM management
 # ──────────────────────────────────────────────
 
 def find_free_gpus(n: int = 1, min_free_mb: int = MIN_FREE_MB) -> list[str]:
@@ -60,7 +60,7 @@ def find_free_gpus(n: int = 1, min_free_mb: int = MIN_FREE_MB) -> list[str]:
             break
     if len(gpus) < n:
         raise RuntimeError(
-            f"여유 GPU {n}장 없음 (기준: {min_free_mb} MB 이상, 찾은 수: {len(gpus)})"
+            f"Not enough free GPUs: need {n} (>= {min_free_mb} MB free), found {len(gpus)}"
         )
     return gpus
 
@@ -76,7 +76,7 @@ def _ping(base_url: str) -> bool:
 def start_vllm(model_path: str, port: int, gpu_id: str, timeout: int = 300) -> subprocess.Popen | None:
     base_url = f"http://localhost:{port}/v1"
     if _ping(base_url):
-        print(f"[port {port}] vLLM 서버 이미 실행 중 — 기존 서버 사용.")
+        print(f"[port {port}] vLLM server already running — reusing it.")
         return None
 
     env = os.environ.copy()
@@ -86,7 +86,7 @@ def start_vllm(model_path: str, port: int, gpu_id: str, timeout: int = 300) -> s
     env.setdefault("NCCL_IB_DISABLE", "1")
 
     log_path = f"/tmp/vllm_{port}_stderr.log"
-    print(f"[port {port}] vLLM 시작 중... (model={Path(model_path).name}, GPU={gpu_id})")
+    print(f"[port {port}] Starting vLLM... (model={Path(model_path).name}, GPU={gpu_id})")
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
@@ -104,19 +104,19 @@ def start_vllm(model_path: str, port: int, gpu_id: str, timeout: int = 300) -> s
     for _ in range(timeout):
         time.sleep(1)
         if proc.poll() is not None:
-            raise RuntimeError(f"[port {port}] vLLM 프로세스가 예기치 않게 종료됨. 로그: {log_path}")
+            raise RuntimeError(f"[port {port}] vLLM process exited unexpectedly. Log: {log_path}")
         if _ping(base_url):
-            print(f"[port {port}] vLLM 준비 완료. (GPU {gpu_id})")
+            print(f"[port {port}] vLLM ready. (GPU {gpu_id})")
             return proc
 
     proc.terminate()
-    raise RuntimeError(f"[port {port}] vLLM 시작 시간 초과 ({timeout}초). 로그: {log_path}")
+    raise RuntimeError(f"[port {port}] vLLM startup timed out ({timeout}s). Log: {log_path}")
 
 
 def stop_vllm(proc: subprocess.Popen | None, port: int):
     if proc is None:
         return
-    print(f"[port {port}] vLLM 종료 중...")
+    print(f"[port {port}] Stopping vLLM...")
     proc.terminate()
     try:
         proc.wait(timeout=30)
@@ -205,10 +205,10 @@ def judge_item(item: dict, oai_client: OpenAI) -> dict | None:
         except Exception as e:
             if attempt < MAX_RETRIES:
                 wait = 2 ** attempt
-                print(f"  RETRY {item['id']} ({attempt}/{MAX_RETRIES}): {e} — {wait}s 대기")
+                print(f"  RETRY {item['id']} ({attempt}/{MAX_RETRIES}): {e} — waiting {wait}s")
                 time.sleep(wait)
             else:
-                print(f"  ERROR {item['id']}: {e} (재시도 {MAX_RETRIES}회 실패)")
+                print(f"  ERROR {item['id']}: {e} (failed after {MAX_RETRIES} retries)")
                 return None
 
 
@@ -229,7 +229,7 @@ def _process_shard(
     oai_client: OpenAI,
     shard_out_path: Path,
 ) -> dict:
-    """한 GPU 샤드의 항목을 처리하고 결과를 shard 파일에 append."""
+    """Process one GPU shard's items and append results to the shard file."""
     written = 0
     failed = 0
     passed = 0
@@ -257,7 +257,7 @@ def _process_shard(
                 print(f"  [Shard {shard_id}] Progress: {total_processed}/{len(items)} (pass={passed}, fail={written-passed}, error={failed})")
                 batch = []
 
-        # 마지막 남은 batch 처리
+        # Process the final remaining batch
         if batch:
             with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
                 futures = {executor.submit(judge_item, it, oai_client): it for it in batch}
@@ -283,13 +283,13 @@ def main():
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # 최종 출력 + 샤드 파일에서 이미 완료된 ID 수집
+    # Collect already-completed IDs from the final output + shard files
     done_ids = load_done_ids(OUT_PATH)
     for sp in [DATA_DIR / "hotpotqa_all_judged_shard0.jsonl",
                DATA_DIR / "hotpotqa_all_judged_shard1.jsonl"]:
         done_ids |= load_done_ids(sp)
 
-    # 입력 로드 (완료된 항목 제외)
+    # Load input (excluding already-completed items)
     all_items: list[dict] = []
     total_input = 0
     with open(IN_PATH, encoding="utf-8") as f:
@@ -300,13 +300,13 @@ def main():
                 item = json.loads(line)
                 if item["id"] not in done_ids:
                     all_items.append(item)
-    print(f"입력 항목: {total_input}개, 기존 완료: {len(done_ids)}개, 남은 처리 대상: {len(all_items)}개")
+    print(f"Input items: {total_input}, already complete: {len(done_ids)}, remaining: {len(all_items)}")
 
     if not all_items:
-        print("모든 항목이 이미 처리됨. 종료.")
+        print("All items already processed. Exiting.")
         return
 
-    # 남은 항목을 반으로 나누기
+    # Split remaining items in half
     mid = len(all_items) // 2
     shards = [all_items[:mid], all_items[mid:]]
     ports = [JUDGE_PORT_BASE, JUDGE_PORT_BASE + 1]
@@ -315,7 +315,7 @@ def main():
         DATA_DIR / "hotpotqa_all_judged_shard1.jsonl",
     ]
 
-    # GPU 확보 & vLLM 시작 (병렬)
+    # Acquire GPUs & start vLLM (in parallel)
     procs: list[subprocess.Popen | None] = [None, None]
     clients: list[OpenAI] = []
 
@@ -326,7 +326,7 @@ def main():
 
         def _start(i: int):
             try:
-                print(f"사용 GPU: {gpus[i]} (port {ports[i]})")
+                print(f"Using GPU: {gpus[i]} (port {ports[i]})")
                 procs[i] = start_vllm(JUDGE_MODEL_PATH, ports[i], gpus[i])
             except Exception as e:
                 vllm_errors[i] = e
@@ -340,7 +340,7 @@ def main():
 
         for i in range(NUM_GPUS):
             if vllm_errors[i] is not None:
-                # 이미 시작된 서버 정리
+                # Clean up any servers already started
                 for j in range(NUM_GPUS):
                     stop_vllm(procs[j], ports[j])
                 raise vllm_errors[i]
@@ -351,7 +351,7 @@ def main():
             clients.append(OpenAI(api_key="EMPTY", base_url=url))
 
     try:
-        # 두 샤드를 스레드로 병렬 처리
+        # Process both shards in parallel threads
         results: list[dict] = [{}] * NUM_GPUS
         threads: list[threading.Thread] = []
 
@@ -366,12 +366,12 @@ def main():
         for t in threads:
             t.join()
 
-        # 샤드 파일 합치기 → 최종 출력
-        print("\n샤드 파일 합치기...")
+        # Merge shard files → final output
+        print("\nMerging shard files...")
         seen_ids: set[str] = set()
         total_written = 0
 
-        # 기존 최종 출력 보존
+        # Preserve existing final output
         if OUT_PATH.exists():
             with open(OUT_PATH, encoding="utf-8") as f:
                 for line in f:
@@ -395,13 +395,13 @@ def main():
                                 seen_ids.add(row["id"])
                                 total_written += 1
 
-        # 샤드 파일 정리
+        # Clean up shard files
         for sp in shard_paths:
             if sp.exists():
                 sp.unlink()
-                print(f"  삭제: {sp.name}")
+                print(f"  Deleted: {sp.name}")
 
-        # 통계
+        # Stats
         total_new = sum(r.get("written", 0) for r in results)
         total_failed = sum(r.get("failed", 0) for r in results)
         total_passed = sum(r.get("passed", 0) for r in results)
